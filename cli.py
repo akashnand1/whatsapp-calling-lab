@@ -150,7 +150,25 @@ def test_ai(
                 chunks.append(c)
         except Exception as e:
             console.print(f"  [red]FAILED[/] {type(e).__name__}: {e}")
-            console.print("  [dim]Ollama: is it running?  curl localhost:11434/api/tags[/]")
+            # Give the hint that matches the CONFIGURED provider. Printing the
+            # Ollama suggestion unconditionally sent someone looking at a local
+            # LLM server when the actual problem was an unset Anthropic key.
+            s = get_settings()
+            hint = {
+                "anthropic":
+                    "ANTHROPIC_API_KEY is not set in THIS shell. It is read from the\n"
+                    "  environment, not .env, so every terminal needs it:\n"
+                    "      export ANTHROPIC_API_KEY='sk-ant-...'\n"
+                    "  The terminal running uvicorn needs it too — restart uvicorn after\n"
+                    "  setting it, or the agent will fail on the first spoken turn.",
+                "openai_compatible":
+                    f"Is the server at {s.llm_base_url} up?  "
+                    "curl localhost:11434/api/tags",
+                "bedrock":
+                    f"Check AWS credentials and that {s.bedrock_model_id or '<BEDROCK_MODEL_ID>'} "
+                    f"is enabled in {s.aws_region or '<AWS_REGION>'}.",
+            }.get(s.llm_provider, "Check LLM_PROVIDER in .env.")
+            console.print(f"  [dim]{hint}[/]")
             return
         if not chunks:
             console.print("  [red]no output[/]")
@@ -232,11 +250,55 @@ def test_ai(
 
         if heard:
             console.print(
-                f"  [green]OK[/] transcript in [bold]{results.get('stt_latency', 0):.0f} ms[/]"
+                f"  [green]OK[/] transcript in [bold]{results.get('stt_latency', 0):.0f} ms[/] "
+                f"[dim](cold — includes loading the model)[/]"
             )
             got = " ".join(heard)
             console.print(f'  said : [dim]"{phrase}"[/]')
             console.print(f'  heard: "{got[:160]}{"…" if len(got) > 160 else ""}"')
+
+            # Measure STT a SECOND time, on the now-cached model.
+            #
+            # This was missing, and the omission made the summary actively
+            # misleading: TTS and LLM both reported warm figures while STT
+            # reported a cold one that included loading ~500MB of weights, and
+            # the three were then added together. On a real call the greeting
+            # warms every stage, so the cold number describes a moment that
+            # never happens while someone is speaking.
+            stt2 = make_stt()
+            try:
+                await stt2.connect()
+                t2 = time.monotonic()
+                warm_stt: float | None = None
+                heard2: list[str] = []
+
+                async def listen2() -> None:
+                    nonlocal warm_stt
+                    async for kind, txt in stt2.events():
+                        if kind == "final" and txt:
+                            if warm_stt is None:
+                                warm_stt = (time.monotonic() - t2) * 1000
+                            heard2.append(txt)
+                            break
+
+                task2 = aio.create_task(listen2())
+                for i in range(0, len(pcm16), step):
+                    await stt2.send_audio(pcm16[i:i + step])
+                    await aio.sleep(0.002)
+                try:
+                    await aio.wait_for(task2, timeout=25)
+                except aio.TimeoutError:
+                    task2.cancel()
+                await stt2.close()
+
+                if warm_stt is not None:
+                    results["stt_latency"] = warm_stt
+                    console.print(
+                        f"  [green]warm[/] second pass in [bold]{warm_stt:.0f} ms[/] "
+                        f"[dim](model already resident — this is the real per-turn cost)[/]"
+                    )
+            except Exception as e:
+                console.print(f"  [dim]warm STT pass skipped: {type(e).__name__}[/]")
         else:
             console.print(
                 "  [yellow]no transcript[/] — with whisper_local this can mean the "
