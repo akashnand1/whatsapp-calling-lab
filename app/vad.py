@@ -78,7 +78,11 @@ class SpeechGate:
         # Fail-safe: if the guard somehow never lifts, drop it after this long.
         # Being deaf to the caller is a worse failure than clipping our own echo.
         self._guard_run = 0
-        self._max_guard_frames = 1500    # 30 s
+        # 5 s of guarding with ZERO frames emitted. Now that the counter resets
+        # on real progress this measures genuine wedging, so it can be short --
+        # the old 30 s was long only because it was racing the read-back.
+        self._max_guard_frames = 250     # 5 s
+        self._last_playback = -1
 
         self._floor = 200.0          # running estimate of ambient noise
         # Running estimate of how loud our OWN voice comes back through the
@@ -98,7 +102,12 @@ class SpeechGate:
     def threshold(self) -> float:
         return max(self._min_threshold, self._floor * self._floor_ratio)
 
-    def update(self, pcm16: bytes, agent_speaking: bool = False) -> bool:
+    def update(
+        self,
+        pcm16: bytes,
+        agent_speaking: bool = False,
+        playback_frames: int | None = None,
+    ) -> bool:
         """Return True when the caller is judged to be speaking."""
         samples = np.frombuffer(pcm16, dtype=np.int16)
         if samples.size == 0:
@@ -126,12 +135,25 @@ class SpeechGate:
         # caller is a worse failure than occasionally clipping our own echo, so
         # after a sustained period force the guard off.
         if guarding:
+            # Reset the stuck-detector whenever playback actually ADVANCES.
+            #
+            # The previous version timed out purely on elapsed guard time, which
+            # cannot distinguish "wedged" from "still talking". The milestone
+            # read-back is a legitimate ~30 s monologue, so a 30 s timeout fired
+            # in the middle of it and switched off echo protection while the
+            # agent was mid-sentence -- the opposite of what the fail-safe is
+            # for. Counting emitted frames tells the two apart exactly: a wedged
+            # track emits nothing, a long one keeps emitting.
+            if playback_frames is not None and playback_frames != self._last_playback:
+                self._last_playback = playback_frames
+                self._guard_run = 0
             self._guard_run += 1
             if self._guard_run > self._max_guard_frames:
                 if self._guard_run == self._max_guard_frames + 1:
                     log.warning(
-                        "echo guard has been on for %ds — playback signal looks "
-                        "stuck; disabling the guard so the caller can be heard",
+                        "echo guard on for %ds with NO audio emitted — playback "
+                        "really is stuck; releasing the guard so the caller can "
+                        "be heard",
                         self._max_guard_frames * 20 // 1000,
                     )
                 guarding = False

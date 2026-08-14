@@ -104,6 +104,24 @@ TOOLS: list[dict] = [
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "give_up_on",
+        "description": (
+            "Mark one milestone as not obtainable after two failed attempts to "
+            "hear the answer. Call this INSTEAD of asking a third time. Asking "
+            "the same question repeatedly is the single largest waste of call "
+            "time and the driver finds it insulting. Once marked, the item stops "
+            "appearing in get_missing, and you mention it as unconfirmed in the "
+            "final summary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "milestone": {"type": "string", "enum": _CODES},
+            },
+            "required": ["milestone"],
+        },
+    },
 ]
 
 
@@ -120,9 +138,18 @@ def make_handlers(state: TripState) -> dict:
         if not missing:
             return f"Stage set to {code}. Nothing missing — you can summarise."
         lines = "\n".join(f"- {m.code}: ask \"{m.ask_hi}\"" for m in missing)
+        # Wording matters more here than in the system prompt. This text arrives
+        # as a tool result immediately before the model speaks, so it outweighs
+        # an instruction given thousands of tokens earlier. An earlier version
+        # said "ask them one at a time", which is exactly what the agent then
+        # did -- 30 turns for 9 milestones -- while the system prompt was asking
+        # it to group. Two sources of truth, and the nearer one won.
         return (
-            f"Stage set to {code}. These earlier milestones still need a time, "
-            f"ask them one at a time in this order:\n{lines}"
+            f"Stage set to {code}. These earlier milestones still need a time. "
+            f"Ask them in GROUPS of two or three in one question, with the "
+            f"matching document question folded into the same turn. Do not ask "
+            f"one at a time, and do not confirm each answer separately — there "
+            f"is a single confirmation at the end:\n{lines}"
         )
 
     def record_milestone(args: dict) -> str:
@@ -155,23 +182,67 @@ def make_handlers(state: TripState) -> dict:
             )
         missing = state.missing()
         docs = state.missing_documents()
+
+        # Pace advice, computed from the clock rather than left to the model's
+        # judgement. The first production-shaped call took 688 seconds because
+        # nothing in the loop knew that was too long. The agent calls this tool
+        # before every question, so this is the natural place to say so.
+        el = state.elapsed_s
+        budget = 240
+        remaining_items = len(missing) + len(docs)
+        if el > budget:
+            pace = (
+                f"\n\nPACE: {el}s elapsed, OVER the {budget}s budget. Ask ALL "
+                f"{remaining_items} remaining item(s) in ONE question now, then "
+                "go straight to the summary. Do not confirm items individually."
+            )
+        elif el > budget * 0.6:
+            pace = (
+                f"\n\nPACE: {el}s elapsed of {budget}s. Running long — group the "
+                "remaining items into a single question and skip any "
+                "confirmation until the final summary."
+            )
+        else:
+            pace = f"\n\nPACE: {el}s elapsed of {budget}s. On track."
+
         if not missing and not docs:
-            return "Nothing missing. Read the summary back for confirmation."
+            return (
+                "Nothing missing. Read the summary back ONCE for confirmation, "
+                "then end the call." + pace
+            )
         out = []
         if missing:
             out.append(
-                "Times still needed (ask in this order):\n"
+                "Times still needed — ask these TOGETHER in one question:\n"
                 + "\n".join(f"- {m.code}: \"{m.ask_hi}\"" for m in missing)
             )
         if docs:
             out.append(
-                "Documents still outstanding:\n"
+                "Documents still outstanding — fold these into the SAME question, "
+                "never a separate turn:\n"
                 + "\n".join(f"- {m.code}: {m.document_hi}" for m in docs)
             )
-        return "\n".join(out)
+        if state.uncertain:
+            out.append(
+                "Given up on (mention as uncertain in the summary, do NOT ask "
+                "again): " + ", ".join(sorted(state.uncertain))
+            )
+        return "\n".join(out) + pace
+
+    def give_up_on(args: dict) -> str:
+        code = args.get("milestone", "")
+        if code not in BY_CODE:
+            return f"unknown milestone '{code}'"
+        state.uncertain.add(code)
+        log.info("gave up on %s after repeated mishearing", code)
+        return (
+            f"Marked {code} as unconfirmed. Move on to the next question now. "
+            "Mention it in the summary as something to be sent by message later."
+        )
 
     return {
         "set_current_stage": set_current_stage,
         "record_milestone": record_milestone,
         "get_missing": get_missing,
+        "give_up_on": give_up_on,
     }

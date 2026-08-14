@@ -89,6 +89,13 @@ class STTProvider(ABC):
     # Set by the pipeline so the provider can guard against the agent's own voice
     # returning through a speakerphone.
     agent_speaking: bool = False
+    # Emitted-frame counter from the outbound track, set by whoever pumps audio.
+    # None means "no information", and the gate falls back to timing alone.
+    playback_frames: int | None = None
+    # True when the last transcript was low-confidence. Engines that give no
+    # confidence signal leave this False, which correctly means "no reason to
+    # doubt it" rather than falsely claiming certainty.
+    last_unclear: bool = False
 
     # True while the provider judges the CALLER to be speaking. Barge-in must be
     # driven from this, not a second VAD in the caller's pump -- a duplicate VAD
@@ -354,7 +361,11 @@ class WhisperLocalSTT(STTProvider):
         # Adaptive gate: threshold follows the ambient noise floor, and is raised
         # while the agent is speaking so its own voice returning through a
         # speakerphone does not register as the caller talking.
-        speaking = self._gate.update(pcm16, agent_speaking=self.agent_speaking)
+        speaking = self._gate.update(
+            pcm16,
+            agent_speaking=self.agent_speaking,
+            playback_frames=getattr(self, "playback_frames", None),
+        )
         self._peak = self._gate.peak
         # Published so barge-in uses THIS decision rather than a second VAD.
         self.caller_speaking = speaking
@@ -433,6 +444,7 @@ class WhisperLocalSTT(STTProvider):
             return
         log.info("utterance #%d: %s", seq, why)
         secs = len(audio) / STT_RATE_LOCAL
+        s_cfg = get_settings()
 
         try:
             segments, _ = await asyncio.to_thread(
@@ -461,14 +473,30 @@ class WhisperLocalSTT(STTProvider):
                     # the output -- which is how "haan" became "बजे". Above ~1.5s
                     # there is enough signal for the vocabulary hint to help
                     # rather than dominate.
-                    initial_prompt=(self._hint if secs >= 1.5 else None),
+                    # Default is NO prompt. The vocabulary hint was meant to
+                    # steer short answers, but on a real call it bled its own
+                    # FORMAT into the output -- a comma-separated word list in,
+                    # comma-separated fragments out ("ना, क्याड़ी, बिल्टी,
+                    # करनेगा"). Prompt-shaped text also scores worse on
+                    # avg_logprob, which trips log_prob_threshold, which fires
+                    # the temperature ladder below and re-decodes the clip up to
+                    # six times. That is why one 7.0s utterance took 18.1s.
+                    # Set WHISPER_USE_HINT=1 to put it back and compare.
+                    initial_prompt=(
+                        self._hint if (s_cfg.whisper_use_hint and secs >= 1.5) else None
+                    ),
                     # DO NOT pin temperature to 0. The default is a fallback
                     # ladder [0.0 .. 1.0]: Whisper decodes greedily first, and
                     # when compression_ratio_threshold detects degenerate output
                     # it RE-DECODES at a higher temperature to escape. Pinning 0
                     # removes that escape and the decoder gets stuck emitting one
                     # token forever -- "बजे बजे बजे बजे ..." for an entire turn.
-                    temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                    # Shortened from [0.0 .. 1.0]. The ladder must exist -- pinning
+                    # 0.0 makes the decoder stick emitting one token forever --
+                    # but six rungs means a bad clip costs six full decodes, and
+                    # rungs above 0.4 produce increasingly invented text anyway.
+                    # Two rungs caps the worst case at 2x instead of 6x.
+                    temperature=s_cfg.whisper_temperature_ladder,
                     # Repetition is THE characteristic Whisper failure on short,
                     # noisy, accented speech. These two attack it directly rather
                     # than relying on the fallback to notice after the fact.
@@ -480,17 +508,50 @@ class WhisperLocalSTT(STTProvider):
                     log_prob_threshold=-1.0,
                 )
             )
-            text = " ".join(s.text.strip() for s in segments).strip()
+            segs = list(segments)
+            text = " ".join(s.text.strip() for s in segs).strip()
         except Exception:
             log.exception("whisper transcribe failed")
             return
 
         took = time.monotonic() - t0
-        log.info(
-            "utterance #%d: %.1fs audio transcribed in %.1fs (%.1fx real time)",
-            seq, secs, took, secs / took if took else 0,
-        )
+        # Report the decoder's own confidence, not just the clock. Without this
+        # a slow, garbled turn is indistinguishable from a slow, correct one,
+        # and there is no way to tell whether the fallback ladder fired.
+        #   avg_logprob  < -1.0  -> below log_prob_threshold, ladder re-decodes
+        #   compression_ratio > 2.4 -> degenerate/repetitive, ladder re-decodes
+        #   no_speech_prob > 0.6 -> Whisper thinks this is not speech at all
+        if segs:
+            lp = sum(s.avg_logprob for s in segs) / len(segs)
+            cr = max(s.compression_ratio for s in segs)
+            ns = max(s.no_speech_prob for s in segs)
+            flags = []
+            if lp < -1.0:
+                flags.append("LOW-CONFIDENCE (ladder fired)")
+            if cr > 2.4:
+                flags.append("REPETITIVE")
+            if ns > 0.6:
+                flags.append("MAYBE-NOT-SPEECH")
+            log.info(
+                "utterance #%d: %.1fs audio transcribed in %.1fs (%.1fx real time) "
+                "logprob=%.2f compression=%.2f no_speech=%.2f%s",
+                seq, secs, took, secs / took if took else 0, lp, cr, ns,
+                ("  <- " + ", ".join(flags)) if flags else "",
+            )
+        else:
+            log.info(
+                "utterance #%d: %.1fs audio transcribed in %.1fs — NO SEGMENTS",
+                seq, secs, took,
+            )
         if text:
+            # Publish how much to trust this transcript. Whisper's own
+            # avg_logprob is the only honest signal available, and without it
+            # downstream code cannot tell a confident transcript from a guess --
+            # so it must either confirm everything (slow) or confirm nothing
+            # (silently records wrong times). Neither is acceptable.
+            self.last_unclear = bool(segs) and (
+                (sum(s.avg_logprob for s in segs) / len(segs)) < -0.75
+            )
             await self._out.put(("final", text))
             await self._out.put(("utterance_end", ""))
 

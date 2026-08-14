@@ -229,6 +229,16 @@ class Pipeline:
                 if looks_like_echo(turn, recent):
                     continue
 
+                # Tell the model how far to trust what it just "heard".
+                #
+                # Confirming every answer wasted a fifth of the first real call;
+                # confirming none of them would silently record a mis-heard time
+                # as fact, which is worse -- a wrong timestamp in the TMS looks
+                # exactly as authoritative as a right one. The decision needs
+                # evidence, and the STT engine is the only thing that has any.
+                if getattr(self.stt, "last_unclear", False):
+                    turn = f"{turn}\n[transcript confidence: LOW — confirm before recording]"
+
                 asyncio.create_task(self.handle_turn(turn))
 
     def stats(self) -> dict[str, object]:

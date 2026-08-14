@@ -82,6 +82,7 @@ async def offer(o: Offer) -> dict[str, str]:
                 # is the speaker that causes echo.
                 audible = pipeline.is_speaking or track.is_playing
                 pipeline.stt.agent_speaking = audible
+                pipeline.stt.playback_frames = track.frames_emitted
 
                 # Feed the provider FIRST so its gate is up to date, then use the
                 # gate's own verdict. Running a separate VAD here was the bug that

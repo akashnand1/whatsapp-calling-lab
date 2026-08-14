@@ -368,6 +368,11 @@ class CallSession:
                     self.track and self.track.is_playing
                 )
                 self.pipeline.stt.agent_speaking = audible
+                # Also hand over the emitted-frame counter, so the gate's
+                # stuck-detector can tell a long read-back from a wedged track.
+                self.pipeline.stt.playback_frames = (
+                    self.track.frames_emitted if self.track else None
+                )
 
                 # Feed the provider first, then trust ITS gate. A second VAD here
                 # has no echo awareness and would cut the agent off on its own voice.

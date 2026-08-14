@@ -52,12 +52,24 @@ class OutboundAudioTrack(MediaStreamTrack):
             format="s16", layout="mono", rate=WIRE_RATE
         )
         self.speaking = False
+        self._frames_emitted = 0
 
     def push_pcm(self, pcm: bytes, rate: int = TTS_RATE) -> None:
         """Queue mono int16 PCM for playback, resampling to the wire rate."""
         if rate != WIRE_RATE:
             pcm = resample_pcm(pcm, rate, WIRE_RATE)
         self._queue.put_nowait(pcm)
+
+    @property
+    def frames_emitted(self) -> int:
+        """Monotonic count of 20 ms frames actually put on the wire.
+
+        Exists so a listener can tell "playing for a long time" apart from
+        "stuck". Duration alone cannot: the milestone read-back is a legitimate
+        ~30 s monologue, and a timeout short enough to catch a wedged track also
+        fires in the middle of it.
+        """
+        return self._frames_emitted
 
     @property
     def is_playing(self) -> bool:
@@ -110,6 +122,7 @@ class OutboundAudioTrack(MediaStreamTrack):
             samples = self._buf[:SAMPLES_PER_FRAME]
             self._buf = self._buf[SAMPLES_PER_FRAME:]
             self.speaking = True
+            self._frames_emitted += 1
         else:
             # Pad the tail, then go quiet.
             samples = np.zeros(SAMPLES_PER_FRAME, dtype=np.int16)

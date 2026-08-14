@@ -23,6 +23,7 @@ arrival one.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -155,6 +156,21 @@ class TripState:
     records: dict[str, MilestoneRecord] = field(default_factory=dict)
     current_stage: Optional[str] = None      # where the driver says he is now
 
+    # Wall-clock start, so the agent can be told how long it has been talking.
+    # A prompt rule saying "keep the call short" is a hope; a number returned
+    # from a tool it already calls every turn is a feedback loop. The first real
+    # call ran 688s for what a human dispatcher does in three minutes, and the
+    # agent had no way to know it was running long.
+    started_at: float = field(default_factory=time.monotonic)
+
+    # Items the agent gave up on after repeated mishearing. Recorded so the
+    # read-back can flag them instead of silently inventing a value.
+    uncertain: set[str] = field(default_factory=set)
+
+    @property
+    def elapsed_s(self) -> int:
+        return int(time.monotonic() - self.started_at)
+
     # -- updates ------------------------------------------------------------
 
     def set_stage(self, code: str) -> None:
@@ -191,7 +207,14 @@ class TripState:
         if self.current_stage is None:
             return []
         upto = BY_CODE[self.current_stage].order
-        return [m for m in LADDER if m.order <= upto and m.code not in self.records]
+        # Abandoned items are excluded, otherwise get_missing keeps offering
+        # them back and the agent asks a fourth and fifth time.
+        return [
+            m for m in LADDER
+            if m.order <= upto
+            and m.code not in self.records
+            and m.code not in self.uncertain
+        ]
 
     def missing_documents(self) -> list[Milestone]:
         return [
@@ -199,6 +222,7 @@ class TripState:
             if m.needs_document
             and m.code in self.records
             and not self.records[m.code].document_status
+            and m.code not in self.uncertain
         ]
 
     def is_complete(self) -> bool:
