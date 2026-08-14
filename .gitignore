@@ -11,6 +11,9 @@ __pycache__/
 venv/
 *.egg-info/
 
+# macOS Finder metadata. Harmless but noisy, and it reveals folder layout.
+.DS_Store
+
 # Logs / scratch
 *.log
 recordings/
