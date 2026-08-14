@@ -1,0 +1,23 @@
+# Secrets. NEVER commit these.
+.env
+.env.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Logs / scratch
+*.log
+recordings/
+last-offer.sdp
+*.wav
+
+# Piper voices: 63MB each, and .devcontainer/setup.sh downloads them. GitHub
+# warns above 50MB and hard-refuses above 100MB, and a repo carrying 122MB of
+# model weights is slow to clone for no benefit.
+voices/

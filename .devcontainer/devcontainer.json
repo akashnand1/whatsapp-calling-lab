@@ -1,0 +1,50 @@
+{
+  "name": "WhatsApp Calling Lab",
+
+  // Debian bookworm + Python 3.11. aiortc and av ship manylinux wheels, so
+  // nothing here needs compiling -- the container comes up in about a minute.
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
+
+  // Free Codespaces gives 2 cores / 8GB, which is enough for Whisper `small`
+  // (~500MB resident) plus Piper plus the agent. It is also roughly double the
+  // sustained CPU of a fanless MacBook Air under thermal throttling, so latency
+  // measured here is more representative than anything measured locally.
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb"
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  },
+
+  // espeak-ng: Piper phonemises through it.
+  // ffmpeg:    PyAV links its own, but the CLI is useful for inspecting audio.
+  // libsrtp2:  SRTP for the media leg.
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends espeak-ng ffmpeg libsrtp2-1 && bash .devcontainer/setup.sh",
+
+  // 8000 must be PUBLIC, not private. Meta's webhook is an unauthenticated
+  // POST from Facebook's servers; a private port would 302 them to a GitHub
+  // login page and the SDP answer would never arrive. If your organisation
+  // forbids public ports this line is silently overridden -- check the PORTS
+  // tab shows "Public" before registering the URL with Meta.
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "whatsapp-lab",
+      "visibility": "public",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  },
+
+  "remoteUser": "vscode"
+}
