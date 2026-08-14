@@ -55,12 +55,20 @@ def _local_addresses() -> list[str]:
         out = subprocess.run(
             ["ifconfig"], capture_output=True, text=True, timeout=5
         ).stdout
-        for tok in out.split():
-            try:
-                ipaddress.IPv4Address(tok)
-                addrs.add(tok)
-            except Exception:
-                continue
+        # Take ONLY the token straight after `inet`. Scanning every IPv4-shaped
+        # token also picks up the netmask and broadcast address on each line --
+        # which is how 255.0.0.0 and 10.0.255.255 ended up being reported as
+        # network interfaces. Harmless, but it makes the output untrustworthy at
+        # exactly the moment you are relying on it to diagnose something.
+        for line in out.splitlines():
+            parts = line.split()
+            for i, tok in enumerate(parts):
+                if tok == "inet" and i + 1 < len(parts):
+                    try:
+                        ipaddress.IPv4Address(parts[i + 1])
+                        addrs.add(parts[i + 1])
+                    except Exception:
+                        pass
     except Exception:
         pass
     return sorted(addrs)

@@ -6,6 +6,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .config import get_settings
@@ -25,6 +26,47 @@ log = logging.getLogger("main")
 app = FastAPI(title="WhatsApp Calling Lab")
 app.include_router(webhook_router)
 app.include_router(selftest_router)
+
+@app.get("/", include_in_schema=False)
+async def index() -> HTMLResponse:
+    """A landing page, purely so `/` is not a bare 404.
+
+    Opening the forwarded URL is the natural first thing to do after starting
+    the server, and a 404 there reads as "the server is broken" when in fact it
+    means "there is no route for /". Worth a few lines to avoid sending someone
+    debugging a working system.
+    """
+    s = get_settings()
+    return HTMLResponse(f"""<!doctype html>
+<meta charset="utf-8"><title>WhatsApp Calling Lab</title>
+<style>
+ body{{font:15px/1.6 -apple-system,system-ui,sans-serif;max-width:44rem;
+       margin:3rem auto;padding:0 1.25rem;color:#1a1a1a}}
+ code{{background:#f3f3f3;padding:.15em .4em;border-radius:3px;font-size:.9em}}
+ a{{color:#0a58ca}} li{{margin:.3rem 0}}
+ .ok{{color:#1a7f37;font-weight:600}} .no{{color:#b42318;font-weight:600}}
+</style>
+<h1>WhatsApp Calling Lab</h1>
+<p>The server is running. This page has no function beyond telling you that.</p>
+<p>
+ Number <code>{s.wa_phone_number_id}</code> &middot;
+ media path {'<span class="ok">STUN</span>' if s.stun_server
+             else '<span class="ok">public IP</span>' if s.public_ip
+             else '<span class="ok">TURN</span>' if (s.turn_server or s.turn_static_auth)
+             else '<span class="no">none configured</span>'} &middot;
+ {'<span class="no">MEDIA_ONLY — no AI</span>' if s.media_only else '<span class="ok">AI agent active</span>'}
+</p>
+<ul>
+ <li><a href="/api/health">/api/health</a> — what this process actually loaded</li>
+ <li><a href="/api/preflight">/api/preflight</a> — asks Meta whether calling can work</li>
+ <li><a href="/selftest">/selftest</a> — talk to the agent in a browser, no phone call</li>
+ <li><a href="/calls">/calls</a> — live call state</li>
+ <li><code>POST /webhook</code> — Meta posts here; register this URL in the App Dashboard</li>
+</ul>
+<p>If Meta cannot verify the webhook, check this port is forwarded
+   <b>Public</b> and not Private.</p>
+""")
+
 
 control = APIRouter(prefix="/api")
 
