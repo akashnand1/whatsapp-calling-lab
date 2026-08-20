@@ -252,7 +252,45 @@ class Pipeline:
                 "max": max(lat) if lat else None,
             },
             "trip": self.trip.to_dict(),
+            "cost": self._cost(),
         }
+
+    def _cost(self) -> dict[str, object]:
+        """Actual LLM spend for this call, from the API's own token counts.
+
+        Reported per call because that is the unit the business cares about, and
+        because an estimate built from character counts was out by an unknown
+        factor -- Devanagari tokenises far worse than Latin and the ratio is not
+        something to guess at.
+        """
+        from .config import get_settings
+        from .providers import estimate_cost_usd
+
+        llm = self.llm
+        tin = getattr(llm, "tokens_in", 0)
+        tout = getattr(llm, "tokens_out", 0)
+        cr = getattr(llm, "tokens_cache_read", 0)
+        cw = getattr(llm, "tokens_cache_write", 0)
+        model = get_settings().anthropic_model
+        usd = estimate_cost_usd(model, tin, tout, cr, cw)
+        out: dict[str, object] = {
+            "model": model,
+            "api_calls": getattr(llm, "api_calls", 0),
+            "tokens_in": tin,
+            "tokens_out": tout,
+            "cache_read": cr,
+            "cache_write": cw,
+            "llm_usd": round(usd, 4) if usd is not None else None,
+        }
+        if cr == 0 and tin > 20000:
+            # Worth flagging: the system prompt and tool schemas are resent in
+            # full on every turn, and they are the bulk of the input. Caching
+            # them costs 1.25x once and 0.1x thereafter.
+            out["hint"] = (
+                "no cache reads — enabling prompt caching on the system prompt "
+                "and tools would cut input cost by roughly half"
+            )
+        return out
 
     def transcript_text(self) -> str:
         return "\n".join(f"{who}: {what}" for who, what in self.transcript)

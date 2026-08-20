@@ -17,6 +17,20 @@ echo "==> Local speech stack"
 # whole point of this container is running the self-hosted stack.
 pip install --quiet faster-whisper piper-tts
 
+# Streaming ASR. Several GB and slow to install, so it is skipped on small
+# machines where it could not be loaded anyway -- Nemotron refuses to start
+# below ~5GB free rather than be OOM-killed mid-call.
+TOTAL_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "$TOTAL_MB" -ge 12000 ]; then
+  echo "    ${TOTAL_MB}MB RAM — installing nemo_toolkit for streaming ASR (several GB, slow)…"
+  pip install --quiet 'nemo_toolkit[asr]' || echo "    !! nemo install failed; Whisper will be used"
+else
+  echo "    ${TOTAL_MB}MB RAM — SKIPPING nemo_toolkit."
+  echo "       Streaming ASR needs ~5GB free and would be OOM-killed here."
+  echo "       Rebuild on a 4-core/16GB machine to enable it, or set"
+  echo "       STT_ENGINE=whisper in .env to make the slower path explicit."
+fi
+
 echo "==> Hindi voice for Piper"
 mkdir -p voices
 HF="https://huggingface.co/rhasspy/piper-voices/resolve/main"

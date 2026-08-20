@@ -179,6 +179,26 @@ async def _handle_calls(value: dict[str, Any]) -> None:
             if session:
                 if session.pipeline:
                     log.info("transcript:\n%s", session.transcript_text())
+                    # Report what the call actually cost, next to the transcript.
+                    # Per-call economics decide whether this scales to a fleet,
+                    # and a number in the log beats a spreadsheet estimate.
+                    try:
+                        st = session.pipeline.stats()
+                        c = st.get("cost") or {}
+                        mins = (call.get("duration") or 0) / 60
+                        wa = mins * 0.0127          # UAE rate, 6-second pulses
+                        llm = c.get("llm_usd")
+                        log.info(
+                            "cost: LLM $%s (%s turns, %s in / %s out / %s cached) "
+                            "+ WhatsApp $%.3f (%.1f min) = $%s",
+                            llm, c.get("api_calls"), c.get("tokens_in"),
+                            c.get("tokens_out"), c.get("cache_read"), wa, mins,
+                            f"{llm + wa:.3f}" if isinstance(llm, float) else "?",
+                        )
+                        if c.get("hint"):
+                            log.info("cost hint: %s", c["hint"])
+                    except Exception:
+                        log.debug("could not compute call cost", exc_info=True)
                 await session.hangup()
                 registry.pop(call_id)
 

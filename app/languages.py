@@ -282,18 +282,17 @@ LANGUAGES: dict[str, LanguageSpec] = {
             "loanwords like لوڈ, پک اپ, بارڈر are normal and correct -- do not "
             "substitute formal Persian or Arabic vocabulary for them."
         ),
-        # Decode Urdu audio with the HINDI model. Spoken Urdu and Hindi are
-        # one language with two scripts, and Nemotron covers Hindi but not Urdu
-        # -- so this buys streaming and a much better WER than Whisper's Urdu.
-        # The transcript arrives in Devanagari; only the LLM reads it, and the
-        # prompt already requires replies in Urdu script.
+        # Nemotron DOES support Urdu natively: its prompt_dictionary contains
+        # "ur-PK". The HuggingFace language tags omit it, which is why an earlier
+        # version of this file decoded Urdu as Hindi as a workaround -- correct
+        # reasoning (they are one spoken language) but unnecessary, and it would
+        # have returned Devanagari instead of Urdu script for no benefit.
+        # Lesson: read the checkpoint, not the metadata.
         stt_engine="nemotron",
-        stt_lang="hi",
         stt_quality=(
-            "Decoded as Hindi via Nemotron (same spoken language, different "
-            "script), which gives streaming and better accuracy than Whisper's "
-            "Urdu. Watch for Perso-Arabic vocabulary and names, which a Hindi "
-            "model may render oddly -- set STT_ENGINE=whisper to compare."
+            "Supported natively by Nemotron as ur-PK, so streaming applies. "
+            "Set STT_ENGINE=whisper to compare if Perso-Arabic names transcribe "
+            "poorly."
         ),
     ),
     "kk": LanguageSpec(

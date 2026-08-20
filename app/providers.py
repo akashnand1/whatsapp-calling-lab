@@ -125,6 +125,29 @@ class STTProvider(ABC):
     async def close(self) -> None: ...
 
 
+# Verified against platform.claude.com/docs/en/about-claude/pricing on
+# 20 Aug 2026. USD per MILLION tokens: (input, output, cache_read, cache_write_5m).
+# Kept here so a call reports real money rather than a token count nobody
+# converts. Re-check before quoting these to anyone -- prices change.
+MODEL_PRICES: dict[str, tuple[float, float, float, float]] = {
+    "claude-opus-5":            (5.00, 25.00, 0.50, 6.25),
+    "claude-sonnet-5":          (2.00, 10.00, 0.20, 2.50),
+    "claude-sonnet-4-6":        (3.00, 15.00, 0.30, 3.75),
+    "claude-haiku-4-5-20251001": (1.00, 5.00, 0.10, 1.25),
+}
+
+
+def estimate_cost_usd(model: str, tin: int, tout: int, cread: int, cwrite: int) -> float | None:
+    """USD for one call's token usage. None when the model is not in the table."""
+    key = next((k for k in MODEL_PRICES if model.startswith(k)), None)
+    if key is None:
+        return None
+    pin, pout, pread, pwrite = MODEL_PRICES[key]
+    return (
+        tin * pin + tout * pout + cread * pread + cwrite * pwrite
+    ) / 1_000_000
+
+
 class TTSProvider(ABC):
     """Streaming text-to-speech. Emits mono int16 PCM at `rate`."""
 
@@ -145,6 +168,12 @@ class LLMProvider(ABC):
         self.history: list[dict] = []
         self._tools: list[dict] = []
         self._handlers: dict = {}
+        # Real token usage for this call, filled in from the API's own reporting.
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.tokens_cache_read = 0
+        self.tokens_cache_write = 0
+        self.api_calls = 0
 
     def register_tools(self, tools: list[dict], handlers: dict) -> None:
         """Attach tool definitions and their Python implementations."""
@@ -646,6 +675,21 @@ class AnthropicLLM(LLMProvider):
                             yield c
                 final = await stream.get_final_message()
 
+            # Accumulate REAL token counts. Per-call cost was previously an
+            # estimate built from character counts and an assumed tokens-per-word
+            # ratio for Devanagari -- which is exactly the kind of number that is
+            # quietly wrong by 2x. The API returns the truth, so record it and
+            # let `pipeline.stats()` report actual money.
+            try:
+                u = final.usage
+                self.tokens_in += getattr(u, "input_tokens", 0) or 0
+                self.tokens_out += getattr(u, "output_tokens", 0) or 0
+                self.tokens_cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
+                self.tokens_cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
+                self.api_calls += 1
+            except Exception:
+                pass
+
             if buf.strip():
                 said.append(buf.strip())
                 yield buf.strip()
@@ -977,7 +1021,23 @@ def make_stt() -> STTProvider:
             )
         else:
             from .stt_nemotron import NemotronStreamingSTT
-            return NemotronStreamingSTT()
+            # Check RAM before choosing, not inside connect(). An 8GB Codespace
+            # cannot hold NeMo + a 2.4GB float32 model + Piper, and exceeding it
+            # gets the whole process OOM-killed with a bare "Terminated" — during
+            # a live call, mid-sentence. Degrading to Whisper is much better than
+            # dying, so decide here where a fallback is still possible.
+            avail = NemotronStreamingSTT._available_mb()
+            need = NemotronStreamingSTT._NEEDED_MB
+            if avail is not None and avail < need:
+                log.error(
+                    "nemotron needs ~%d MB but only %d MB is free — falling back "
+                    "to Whisper rather than risking an OOM kill mid-call. Either "
+                    "set STT_ENGINE=whisper to make this explicit, or rebuild the "
+                    "Codespace on a 4-core/16GB machine.",
+                    need, avail,
+                )
+            else:
+                return NemotronStreamingSTT()
     elif want != "whisper":
         log.warning("unknown STT_ENGINE=%s; using whisper", want)
     return WhisperLocalSTT()

@@ -124,8 +124,43 @@ class NemotronStreamingSTT(STTProvider):
         self._prev_pred = None
         self._step = 0
 
+    # Rough resident cost measured on an 8 GB Codespace: NeMo + torch import is
+    # ~1.5-2 GB, the 0.6B model in float32 is ~2.4 GB, and the .nemo archive is
+    # extracted to disk first (2.37 GB). With Piper's onnxruntime and the VS Code
+    # server already resident, 8 GB is not enough -- the kernel OOM-killer ends
+    # the process with a bare "Terminated" and no traceback, which is the most
+    # confusing failure in this whole stack. So check first and say so.
+    _NEEDED_MB = 5000
+
+    @staticmethod
+    def _available_mb() -> int | None:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) // 1024
+        except Exception:
+            pass
+        return None
+
     # -- lifecycle ---------------------------------------------------------
     async def connect(self) -> None:
+        avail = self._available_mb()
+        if avail is not None and avail < self._NEEDED_MB:
+            raise MemoryError(
+                f"nemotron needs roughly {self._NEEDED_MB} MB but only {avail} MB "
+                f"is available. Loading it would get this process OOM-killed with "
+                f"a bare 'Terminated' and no explanation.\n"
+                f"Options, cheapest first:\n"
+                f"  1. STT_ENGINE=whisper in .env — works now, ~5s slower per turn\n"
+                f"  2. Rebuild the Codespace on a 4-core/16GB machine (burns free\n"
+                f"     core-hours twice as fast, but fits comfortably)\n"
+                f"  3. Stop other processes: the VS Code server and a running\n"
+                f"     uvicorn together hold well over a gigabyte"
+            )
+        if avail is not None:
+            log.info("nemotron: %d MB available, need ~%d MB", avail, self._NEEDED_MB)
+
         async with _MODEL_LOCK:
             cached = _MODEL_CACHE.get(self._model_name)
             if cached is None:

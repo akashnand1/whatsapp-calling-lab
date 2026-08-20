@@ -5,13 +5,20 @@
   // nothing here needs compiling -- the container comes up in about a minute.
   "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
 
-  // Free Codespaces gives 2 cores / 8GB, which is enough for Whisper `small`
-  // (~500MB resident) plus Piper plus the agent. It is also roughly double the
-  // sustained CPU of a fanless MacBook Air under thermal throttling, so latency
-  // measured here is more representative than anything measured locally.
+  // 16GB is a MEASURED requirement, not a preference. On the 8GB machine the
+  // process was OOM-killed with a bare "Terminated" while loading the streaming
+  // recogniser: NeMo + torch is ~2GB resident, the 0.6B model in float32 is
+  // ~2.4GB (cache-aware models cannot use fp16), the .nemo archive extracts to
+  // 2.37GB on disk first, and Piper's onnxruntime plus the VS Code server were
+  // already holding over a gigabyte.
+  //
+  // Cost: free Codespaces gives 120 core-hours/month, so 4 cores means ~30
+  // hours instead of ~60. To go back to the cheaper machine, set this to
+  // 2 / "8gb" AND set STT_ENGINE=whisper in .env — Nemotron will refuse to load
+  // below ~5GB free rather than risk being killed mid-call.
   "hostRequirements": {
-    "cpus": 2,
-    "memory": "8gb"
+    "cpus": 4,
+    "memory": "16gb"
   },
 
   "features": {
