@@ -76,7 +76,14 @@ def _spoken_turn_tokens() -> int:
     caller simply never heard the summary. A cap only needs to be low enough to
     stop rambling, and the prompt already enforces brevity.
     """
-    return 1400 if _s().agent_language.lower()[:2] in ("hi", "ar") else 800
+    code = _s().agent_language.lower()[:2]
+    if code in ("hi", "ar"):
+        return 1400
+    # Registered languages carry their own budget, because tokens-per-word varies
+    # by script: Cyrillic costs more than Latin, Devanagari more again.
+    from .languages import spec
+    s = spec(code)
+    return s.turn_tokens if s else 800
 
 
 # ===========================================================================
@@ -275,7 +282,16 @@ class WhisperLocalSTT(STTProvider):
         #                language, at the cost of occasional wrong guesses on very
         #                short replies like "haan" or "ok".
         code = get_settings().agent_language.lower()
-        self._language = None if code.startswith("auto") else (code[:2] or None)
+        # Decode as the language the registry says, not necessarily the one we
+        # SPEAK. Urdu is the case: it decodes as Hindi, because they are the same
+        # spoken language and Hindi is far better resourced. Reading
+        # agent_language directly would decode Urdu audio as Urdu and lose that.
+        from .languages import spec as _lspec
+        _sp = _lspec(code)
+        if _sp is not None:
+            self._language = _sp.decode_lang
+        else:
+            self._language = None if code.startswith("auto") else (code[:2] or None)
 
         from .config import STT_HINT
         self._hint = STT_HINT
@@ -813,6 +829,33 @@ class PiperLocalTTS(TTSProvider):
         self._model = _s().piper_model
         self.rate = _s().piper_rate
 
+        # If PIPER_MODEL points at a voice for a DIFFERENT language than
+        # AGENT_LANGUAGE, prefer the voice that matches the language and say so
+        # loudly. Mismatch is silent and baffling: the agent generates correct
+        # Turkish and a Hindi voice reads it as gibberish, which sounds like a
+        # broken model rather than a one-line config error.
+        from .languages import spec as _lang_spec
+        want = _lang_spec(_s().agent_language)
+        if want and self._model and want.piper_voice not in os.path.basename(self._model):
+            guess = os.path.join(
+                os.path.dirname(self._model), f"{want.piper_voice}.onnx"
+            )
+            if os.path.exists(guess):
+                log.warning(
+                    "PIPER_MODEL is %s but AGENT_LANGUAGE=%s — switching to %s",
+                    os.path.basename(self._model), want.code,
+                    os.path.basename(guess),
+                )
+                self._model = guess
+            else:
+                log.error(
+                    "AGENT_LANGUAGE=%s but PIPER_MODEL is %s, and %s is not "
+                    "downloaded. The agent will speak %s through a voice trained "
+                    "on another language. Run: bash scripts/fetch-voice.sh %s",
+                    want.code, os.path.basename(self._model),
+                    f"{want.piper_voice}.onnx", want.english_name, want.code,
+                )
+
         if not self._model:
             log.warning("PIPER_MODEL not set; local TTS will fail")
         elif not os.path.exists(self._model):
@@ -901,12 +944,43 @@ class PiperLocalTTS(TTSProvider):
 # ===========================================================================
 
 def make_stt() -> STTProvider:
-    name = _s().stt_provider.lower()
-    if name == "whisper_local":
-        return WhisperLocalSTT()
+    s = _s()
+    name = s.stt_provider.lower()
     if name == "deepgram":
         return DeepgramSTT()
-    raise ValueError(f"unknown STT_PROVIDER={name}")
+    if name != "whisper_local":
+        raise ValueError(f"unknown STT_PROVIDER={name}")
+
+    # Local STT is now TWO engines, chosen per language. Nemotron is cache-aware
+    # streaming and much faster and more accurate where it is supported, but it
+    # does not cover Kazakh -- so the choice belongs to the language, not to a
+    # single global switch. STT_ENGINE overrides it for A/B testing.
+    from .languages import spec
+    lang = spec(s.agent_language)
+    want = s.stt_engine.lower()
+    if want == "auto":
+        want = lang.stt_engine if lang else "whisper"
+
+    if want == "nemotron":
+        # Probe for the dependency HERE, not by catching ImportError around the
+        # constructor. stt_nemotron imports nemo lazily inside _load(), so the
+        # constructor succeeds on a machine without nemo and the failure surfaces
+        # mid-call, on the first thing the driver says. Check up front instead.
+        import importlib.util
+        if importlib.util.find_spec("nemo") is None:
+            log.error(
+                "AGENT_LANGUAGE=%s wants the nemotron streaming recogniser, but "
+                "nemo_toolkit is not installed. Falling back to Whisper, which is "
+                "roughly 5s slower per turn. Install it with:\n"
+                "    pip install 'nemo_toolkit[asr]'",
+                s.agent_language,
+            )
+        else:
+            from .stt_nemotron import NemotronStreamingSTT
+            return NemotronStreamingSTT()
+    elif want != "whisper":
+        log.warning("unknown STT_ENGINE=%s; using whisper", want)
+    return WhisperLocalSTT()
 
 
 def make_llm(system_prompt: str) -> LLMProvider:
@@ -931,20 +1005,52 @@ def make_tts() -> TTSProvider:
 
 def describe_stack() -> dict[str, str]:
     """What is configured, and whether each stage leaves your network."""
-    stt = _s().stt_provider.lower()
-    llm = _s().llm_provider.lower()
-    tts = _s().tts_provider.lower()
+    s = _s()
+    stt = s.stt_provider.lower()
+    llm = s.llm_provider.lower()
+    tts = s.tts_provider.lower()
+
+    # "whisper_local" alone stopped being the whole truth once local STT became
+    # two engines chosen per language. Reporting it unqualified would hide the
+    # single most important performance fact about a call -- whether that
+    # language is streaming or doing 5.5-second batch decodes.
+    if stt == "whisper_local":
+        from .languages import spec
+        lang = spec(s.agent_language)
+        want = s.stt_engine.lower()
+        if want == "auto":
+            want = lang.stt_engine if lang else "whisper"
+        import importlib.util
+        have_nemo = importlib.util.find_spec("nemo") is not None
+        if want == "nemotron" and have_nemo:
+            stt = "nemotron_streaming"
+        elif want == "nemotron":
+            stt = "whisper_local (nemotron wanted, nemo_toolkit MISSING)"
+        else:
+            stt = "whisper_local"
+        if lang and lang.stt_lang:
+            stt += f", decoding {lang.code} as {lang.decode_lang}"
     external = {
         "deepgram": "caller audio -> Deepgram (US)",
         "whisper_local": "stays on your hardware",
+        "nemotron_streaming": "stays on your hardware, streaming",
         "anthropic": "transcript -> Anthropic API",
         "bedrock": f"transcript -> AWS Bedrock ({_s().aws_region})",
         "openai_compatible": f"stays on your network ({_s().llm_base_url})",
         "elevenlabs": "agent script -> ElevenLabs (US)",
         "piper_local": "stays on your hardware",
     }
+    # Look the residency note up from the BASE engine, not the decorated string.
+    # Decorating stt with "(nemo_toolkit MISSING)" made the lookup miss and print
+    # "?" where it should say the audio stays on your hardware -- and that column
+    # is the whole point of this function for the data-residency question.
+    stt_base = (
+        "nemotron_streaming" if stt.startswith("nemotron")
+        else "whisper_local" if stt.startswith("whisper_local")
+        else stt
+    )
     return {
-        "stt": f"{stt} — {external.get(stt, '?')}",
+        "stt": f"{stt} — {external.get(stt_base, '?')}",
         "llm": f"{llm} — {external.get(llm, '?')}",
         "tts": f"{tts} — {external.get(tts, '?')}",
     }

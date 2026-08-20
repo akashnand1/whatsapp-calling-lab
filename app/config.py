@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     # The vocabulary hint is OFF by default: on a live call it bled its own
     # comma-separated format into the transcript and depressed confidence,
     # which fired the temperature ladder and made decoding several times slower.
+    # --- Speech recognition backend ---
+    # "auto" is the intended setting: each language picks its own engine from
+    # app/languages.py, because no single model covers all seven. Force
+    # "whisper" or "nemotron" to A/B one language against the other engine.
+    stt_engine: str = "auto"
+    nemotron_model: str = "nvidia/nemotron-3.5-asr-streaming-0.6b"
+    # Streaming chunk in seconds. NVIDIA's published WER figures use 1.12s, and
+    # this is the latency/accuracy dial: smaller chunks return partials sooner
+    # but see less context, so accuracy drops at the chunk boundaries.
+    nemotron_chunk_s: float = 1.12
+
     whisper_use_hint: bool = False
     # Comma-separated. Two rungs, not six -- the ladder is needed to escape
     # degenerate decoding, but each extra rung is another full decode of the
@@ -249,15 +260,34 @@ _GREETING_HI_OUT = (
 _GREETING_HI_IN = "ट्रकर डिस्पैच, मैं ऑटोमेटेड असिस्टेंट बोल रहा हूँ। मैं आपकी क्या मदद कर सकता हूँ?"
 
 
-_BY_LANG = {
-    "en": (_PROMPT_EN, _GREETING_EN_OUT, _GREETING_EN_IN),
+# Hindi keeps a hand-tuned prompt: Devanagari-only for the TTS, masculine verb
+# agreement, and driver colloquialisms, all of which were paid for in failed
+# calls. Every OTHER language is composed from the shared English policy in
+# languages.py plus its own script/register notes -- so a rule fixed once is
+# fixed everywhere, instead of drifting between translated copies.
+# English is deliberately NOT here. It used to be, pointing at a short prompt
+# that predated the call-shortening work -- so English silently kept asking one
+# question at a time and confirming every answer, the exact behaviour that made
+# the first real call 11 minutes long. It now uses the shared POLICY like every
+# other non-Hindi language, which is also where that policy is written.
+_TUNED = {
     "hi": (_PROMPT_HI, _GREETING_HI_OUT, _GREETING_HI_IN),
 }
 
 
+def _by_lang(code: str) -> tuple[str, str, str] | None:
+    if code in _TUNED:
+        return _TUNED[code]
+    from .languages import build_prompt, spec
+    s = spec(code)
+    if s is None:
+        return None
+    return (build_prompt(code) or "", s.greeting_out, s.greeting_in)
+
+
 def _lang() -> str:
     code = get_settings().agent_language.lower()[:2]
-    return code if code in _BY_LANG else "en"
+    return code if _by_lang(code) else "en"
 
 
 def _today_fragment() -> str:
@@ -284,10 +314,17 @@ def _build_prompt() -> str:
     The ladder is appended from milestones.py rather than written out here, so
     there is exactly one place to change a milestone name or its phrasing.
     """
-    base = _BY_LANG[_lang()][0]
+    lang = _lang()
+    base = _by_lang(lang)[0]
     try:
+        from .languages import today_fragment_en
         from .milestones import prompt_fragment
-        return base + "\n" + _today_fragment() + "\n" + prompt_fragment(_lang())
+        # The Hindi date anchor names the relative days in Hindi; every other
+        # language uses the English one. The model reads it either way -- what
+        # matters is that it has today's date at all, or "the day before
+        # yesterday at eight" cannot become a timestamp.
+        today = _today_fragment() if lang == "hi" else today_fragment_en()
+        return base + "\n" + today + "\n" + prompt_fragment(lang)
     except Exception:                       # never break the agent over this
         return base
 
@@ -326,9 +363,9 @@ _HINT_EN = (
 STT_HINT = _HINT_HI if _lang() == "hi" else _HINT_EN
 
 # Outbound: WE called THEM, so they are waiting for us to explain ourselves.
-GREETING = _BY_LANG[_lang()][1]
+GREETING = _by_lang(_lang())[1]
 
 # Inbound: THEY called US, so identify quickly and hand them the floor.
 # Kept shorter than the outbound greeting -- they already have a reason to be
 # calling and every extra word delays them saying it.
-INBOUND_GREETING = _BY_LANG[_lang()][2]
+INBOUND_GREETING = _by_lang(_lang())[2]

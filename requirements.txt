@@ -17,6 +17,18 @@ anthropic==0.42.0          # LLM
 websockets==14.1           # Deepgram streaming STT
 numpy==2.2.1               # VAD / audio maths
 
+# --- Streaming speech recognition (OPTIONAL, install separately) ---
+# nvidia/nemotron-3.5-asr-streaming-0.6b needs NeMo, which pulls torch,
+# lightning and hydra -- gigabytes, against faster-whisper's hundreds of
+# megabytes. Deliberately NOT pinned here so a plain `pip install -r` stays
+# small; the code falls back to Whisper with a loud log if it is absent.
+#
+#     pip install 'nemo_toolkit[asr]'
+#
+# Worth it because it moves STT from ~5500ms batch decoding to streaming, which
+# is 76% of the current call latency. Cache-aware models are float32-only, so
+# budget ~2.5GB resident for the 0.6B model.
+
 # --- CLI niceties ---
 typer==0.15.1
 rich==13.9.4
