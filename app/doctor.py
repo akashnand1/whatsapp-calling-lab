@@ -226,6 +226,33 @@ def diagnose() -> list[Finding]:
         )
     )
 
+    # The LLM key lives in the ENVIRONMENT, not .env, which means a shell that
+    # forgot to export it produces a call that rings, greets the driver, and then
+    # fails on the very first thing they say. Worth catching before the call.
+    if not s.media_only:
+        prov = s.llm_provider.lower()
+        missing_key = (
+            prov == "anthropic" and not s.anthropic_api_key
+        ) or (
+            prov == "bedrock" and not s.aws_region
+        )
+        out.append(
+            Finding(
+                ok=not missing_key,
+                title="LLM credentials",
+                detail=(
+                    f"{prov}: key present" if not missing_key
+                    else f"{prov}: NO credentials in this environment"
+                ),
+                fix="" if not missing_key else (
+                    "export ANTHROPIC_API_KEY='sk-ant-...' in the shell that runs\n"
+                    "       uvicorn, then restart it. The agent will otherwise greet the\n"
+                    "       caller and go silent on their first reply.\n"
+                    "       Note this is read from the environment, NOT from .env."
+                ),
+            )
+        )
+
     if s.wa_app_secret:
         out.append(Finding(True, "Webhook signature check", "WA_APP_SECRET set — verified"))
     else:

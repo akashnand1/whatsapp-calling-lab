@@ -27,7 +27,15 @@ from rich.table import Table
 
 from app.graph import GraphClient, GraphError
 
-app = typer.Typer(add_completion=False, help="WhatsApp Calling Lab CLI")
+app = typer.Typer(
+    add_completion=False,
+    help="WhatsApp Calling Lab CLI",
+    # Typer prints locals in tracebacks by default. In this codebase the locals
+    # are audio buffers, so a single unset API key produced 300 lines of raw PCM
+    # and the actual cause scrolled off the screen. Errors are only useful if
+    # they can be read.
+    pretty_exceptions_show_locals=False,
+)
 console = Console()
 SERVER = "http://127.0.0.1:8000"
 
@@ -68,6 +76,24 @@ def test_ai(
 
     console.print(Panel("\n".join(f"{k:4s} {v}" for k, v in describe_stack().items()),
                         title="configured stack", border_style="cyan"))
+
+    # Check credentials BEFORE loading models. Whisper and Piper take 30-60s to
+    # load on first run, and it is a poor trade to spend that only to fail on an
+    # unset environment variable that could have been checked in a millisecond.
+    _cfg = _gs0()
+    if _cfg.llm_provider.lower() == "anthropic" and not _cfg.anthropic_api_key:
+        console.print(
+            "\n[red]ANTHROPIC_API_KEY is not set in this shell.[/]\n"
+            "It is read from the environment, not .env, so every terminal needs "
+            "it:\n\n"
+            "    [bold]export ANTHROPIC_API_KEY='sk-ant-...'[/]\n\n"
+            "The terminal running uvicorn needs it too — restart uvicorn after "
+            "setting it, or the agent will greet the caller and then fail on the "
+            "first thing they say.\n"
+            "To avoid re-exporting on every rebuild, add it once as a Codespaces "
+            "secret: https://github.com/settings/codespaces\n"
+        )
+        raise typer.Exit(1)
 
     results: dict[str, float] = {}
 
@@ -153,7 +179,13 @@ def test_ai(
             # Give the hint that matches the CONFIGURED provider. Printing the
             # Ollama suggestion unconditionally sent someone looking at a local
             # LLM server when the actual problem was an unset Anthropic key.
-            s = get_settings()
+            # Import locally. cli.py has no module-level `get_settings`, so the
+            # earlier version of this block raised NameError *while reporting the
+            # real error* -- which replaced a one-line "your API key is unset"
+            # with 300 lines of traceback ending in the wrong exception. An error
+            # handler that can itself fail is worse than no handler.
+            from app.config import get_settings as _gs_err
+            s = _gs_err()
             hint = {
                 "anthropic":
                     "ANTHROPIC_API_KEY is not set in THIS shell. It is read from the\n"
