@@ -390,7 +390,20 @@ def test_ai(
                     audio_secs = results.get("_audio_secs", 0) or 0
                     compute_s = time.monotonic() - compute0
                     rtf = (compute_s / audio_secs) if audio_secs else 0
-                    if behind:
+                    # RTF is meaningless for a CLOUD engine: the compute
+                    # happens on their hardware, so this only measures our own
+                    # feed loop, which is ~1.0 by construction because we feed at
+                    # real time. Saying "send_audio blocked on the forward pass"
+                    # about Deepgram is simply wrong.
+                    is_cloud = "deepgram" in describe_stack()["stt"]
+                    if is_cloud:
+                        console.print(
+                            f"  [green]{results['stt_latency']:.0f} ms[/] after "
+                            f"end-of-speech [dim](cloud engine — RTF below measures "
+                            f"our feed loop, not their compute, so it is ~1.0 by "
+                            f"construction and tells you nothing)[/]"
+                        )
+                    elif behind:
                         console.print(
                             f"  [red]BEHIND REAL TIME[/] — send_audio() blocked on "
                             f"the forward pass, so the engine never caught up. The "
@@ -404,6 +417,7 @@ def test_ai(
                             f"after end-of-speech [dim](what the caller waits)[/]"
                         )
                     console.print(
+                        f"  [dim]RTF {rtf:.2f} (feed loop only)[/]" if is_cloud else
                         f"  [{'red' if rtf >= 1 else 'green'}]RTF {rtf:.2f}[/] — "
                         f"{compute_s:.1f}s of compute for {audio_secs:.1f}s of audio. "
                         + ("Above 1.0: it CANNOT stream in real time here, so "

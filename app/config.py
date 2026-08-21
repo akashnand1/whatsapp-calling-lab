@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     # --- LLM ---
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
+    # Cache the system prompt and tool schemas. They are byte-identical on every
+    # turn and together are ~5,500 tokens, so without this they are re-billed on
+    # all ~24 turns of a call. Write costs 1.25x once, reads cost 0.1x.
+    prompt_caching: bool = True
     aws_region: str = "us-east-1"
     bedrock_model_id: str = ""
     llm_base_url: str = "http://localhost:11434/v1"

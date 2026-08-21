@@ -738,6 +738,37 @@ class AnthropicLLM(LLMProvider):
             self._client = AsyncAnthropic(api_key=s.anthropic_api_key)
             log.info("LLM: claude via anthropic api")
 
+    def _cached_system(self):
+        """System prompt as a cacheable block.
+
+        The Hindi prompt plus the milestone ladder is ~4,500 tokens and it is
+        IDENTICAL on every turn of every call. Without caching it is re-read and
+        re-billed 24 times per call, which is most of the input cost and part of
+        the latency. A cache write costs 1.25x once; every read after that is
+        0.1x. See MODEL_PRICES above for the rates this is based on.
+        """
+        if not _s().prompt_caching:
+            return self.system
+        return [{
+            "type": "text",
+            "text": self.system,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    def _cached_tools(self):
+        """Tool schemas, with the cache breakpoint on the LAST one.
+
+        A breakpoint caches everything BEFORE it, so one marker on the final
+        tool covers the whole array. Marking every tool would waste breakpoints
+        (there are only four available per request).
+        """
+        tools = self._tools or []
+        if not tools or not _s().prompt_caching:
+            return tools
+        out = [dict(t) for t in tools]
+        out[-1]["cache_control"] = {"type": "ephemeral"}
+        return out
+
     async def respond(self, user_text: str) -> AsyncIterator[str]:
         self.history.append({"role": "user", "content": user_text})
         async for chunk in self._turn():
@@ -758,9 +789,9 @@ class AnthropicLLM(LLMProvider):
             async with self._client.messages.stream(
                 model=self._model,
                 max_tokens=_spoken_turn_tokens(),
-                system=self.system,
+                system=self._cached_system(),
                 messages=self.history,
-                tools=self._tools or [],
+                tools=self._cached_tools(),
             ) as stream:
                 async for event in stream:
                     if (
@@ -873,6 +904,37 @@ class OpenAICompatLLM(LLMProvider):
         self._key = _s().llm_api_key
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
         log.info("LLM: openai-compatible %s @ %s", self._model, self._base)
+
+    def _cached_system(self):
+        """System prompt as a cacheable block.
+
+        The Hindi prompt plus the milestone ladder is ~4,500 tokens and it is
+        IDENTICAL on every turn of every call. Without caching it is re-read and
+        re-billed 24 times per call, which is most of the input cost and part of
+        the latency. A cache write costs 1.25x once; every read after that is
+        0.1x. See MODEL_PRICES above for the rates this is based on.
+        """
+        if not _s().prompt_caching:
+            return self.system
+        return [{
+            "type": "text",
+            "text": self.system,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    def _cached_tools(self):
+        """Tool schemas, with the cache breakpoint on the LAST one.
+
+        A breakpoint caches everything BEFORE it, so one marker on the final
+        tool covers the whole array. Marking every tool would waste breakpoints
+        (there are only four available per request).
+        """
+        tools = self._tools or []
+        if not tools or not _s().prompt_caching:
+            return tools
+        out = [dict(t) for t in tools]
+        out[-1]["cache_control"] = {"type": "ephemeral"}
+        return out
 
     async def respond(self, user_text: str) -> AsyncIterator[str]:
         self.history.append({"role": "user", "content": user_text})
