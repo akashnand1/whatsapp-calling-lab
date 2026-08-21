@@ -349,21 +349,41 @@ def test_ai(
                 await stt2.close()
 
                 if first_at2:
-                    warm_stt = max((first_at2[0] - fed_at) * 1000, 0.0)
+                    warm_stt = (first_at2[0] - fed_at) * 1000
                 if warm_stt is not None:
-                    results["stt_latency"] = max(warm_stt, 0.0)
+                    # A NEGATIVE value is meaningful, not an error to hide: the
+                    # transcript arrived before we finished feeding, which means
+                    # send_audio() was BLOCKING on the forward pass and the engine
+                    # is running behind real time. Clamping it to 0 reported
+                    # "instant" for an engine that cannot keep up -- the most
+                    # flattering possible reading of the worst possible result.
+                    behind = warm_stt < 0
+                    results["stt_latency"] = abs(warm_stt) if behind else warm_stt
                     audio_secs = results.get("_audio_secs", 0) or 0
                     compute_s = time.monotonic() - compute0
                     rtf = (compute_s / audio_secs) if audio_secs else 0
+                    if behind:
+                        console.print(
+                            f"  [red]BEHIND REAL TIME[/] — the transcript arrived "
+                            f"{results['stt_latency']:.0f} ms before the audio "
+                            f"finished feeding, because send_audio() blocked on "
+                            f"the forward pass. The engine cannot keep up, so the "
+                            f"backlog grows with every second the caller talks."
+                        )
+                    else:
+                        console.print(
+                            f"  [green]warm[/] [bold]{results['stt_latency']:.0f} ms[/] "
+                            f"after end-of-speech [dim](what the caller waits)[/]"
+                        )
                     console.print(
-                        f"  [green]warm[/] [bold]{results['stt_latency']:.0f} ms[/] after "
-                        f"end-of-speech [dim](what the caller waits)[/]"
-                    )
-                    console.print(
-                        f"  [dim]RTF {rtf:.2f} — {compute_s:.1f}s of compute for "
-                        f"{audio_secs:.1f}s of audio. Under 1.0 means a streaming "
-                        f"engine keeps up live, so the work overlaps the caller "
-                        f"talking instead of following it.[/]"
+                        f"  [{'red' if rtf >= 1 else 'green'}]RTF {rtf:.2f}[/] — "
+                        f"{compute_s:.1f}s of compute for {audio_secs:.1f}s of audio. "
+                        + ("Above 1.0: it CANNOT stream in real time here, so "
+                           "streaming buys no latency and a 10s utterance costs "
+                           f"~{rtf*10:.0f}s of compute."
+                           if rtf >= 1 else
+                           "Under 1.0: keeps up live, so the work hides inside "
+                           "the caller's speech.")
                     )
             except Exception as e:
                 console.print(f"  [dim]warm STT pass skipped: {type(e).__name__}[/]")

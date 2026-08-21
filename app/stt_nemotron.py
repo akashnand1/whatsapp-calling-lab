@@ -221,8 +221,27 @@ class NemotronStreamingSTT(STTProvider):
         self._reset_stream()
 
     def _load(self):
+        import os as _os
+
         import torch
         from nemo.collections.asr.models import ASRModel
+
+        # Set thread count EXPLICITLY and report it. torch's default depends on
+        # the container's cgroup limits and can come out as 1, which would make a
+        # 4-core machine behave like a 1-core one -- and the symptom is simply
+        # "the model is too slow", indistinguishable from the model being too big.
+        # Measure before concluding this needs a GPU.
+        cores = _os.cpu_count() or 1
+        want = max(1, cores - 1)          # leave one core for the media pump
+        torch.set_num_threads(want)
+        try:
+            torch.set_num_interop_threads(2)
+        except RuntimeError:
+            pass                          # already initialised; not fatal
+        log.info(
+            "nemotron: torch threads=%d (of %d cores), interop=%d",
+            torch.get_num_threads(), cores, torch.get_num_interop_threads(),
+        )
 
         model = ASRModel.from_pretrained(self._model_name, map_location="cpu")
         model.eval()
