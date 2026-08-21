@@ -299,6 +299,10 @@ def test_ai(
         sent_at = time.monotonic()
         results["_audio_secs"] = audio_secs
         results["_fed_wall"] = sent_at - wall0
+        # Tell the engine we are done sending. Without this, a cloud engine sits
+        # waiting for more audio and eventually closes the socket -- Deepgram
+        # returns 1011 "did not receive audio data within the timeout window".
+        await stt.finalize()
         try:
             await aio.wait_for(task, timeout=25)
         except aio.TimeoutError:
@@ -351,6 +355,7 @@ def test_ai(
                     await stt2.send_audio(pcm16[i:i + step])
                     await aio.sleep(0.02)          # real time
                 fed_at = time.monotonic()
+                await stt2.finalize()
                 try:
                     await aio.wait_for(task2, timeout=25)
                 except aio.TimeoutError:

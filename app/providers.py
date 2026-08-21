@@ -124,6 +124,12 @@ class STTProvider(ABC):
     @abstractmethod
     async def close(self) -> None: ...
 
+    async def finalize(self) -> None:
+        """Flush and return whatever is pending. No-op for engines that decode
+        on end-of-speech anyway; Deepgram needs it because otherwise a caller
+        that stops sending audio waits for an idle timeout instead of a result."""
+        return None
+
 
 # Verified against platform.claude.com/docs/en/about-claude/pricing on
 # 20 Aug 2026. USD per MILLION tokens: (input, output, cache_read, cache_write_5m).
@@ -243,6 +249,10 @@ class DeepgramSTT(STTProvider):
         # also stops us paying Deepgram per-minute for our own audio.
         self._tail = 0
         self._tail_frames = 20            # 400 ms at 20 ms/frame
+        # Deepgram hangs up after ~10s with nothing received. Send a KeepAlive
+        # every few seconds while suppressed, comfortably inside that window.
+        self._last_sent = time.monotonic()
+        self._keepalive_s = 3.0
 
     async def connect(self) -> None:
         import websockets
@@ -257,16 +267,48 @@ class DeepgramSTT(STTProvider):
         if not self._ws or self._closed:
             return
         # Do not forward our own playback. Costs money and gets transcribed.
+        suppress = self.agent_speaking or self._tail > 0
         if self.agent_speaking:
             self._tail = self._tail_frames
-            return
-        if self._tail > 0:
+        elif self._tail > 0:
             self._tail -= 1
+
+        if suppress:
+            # CRITICAL: Deepgram closes the socket with 1011 after ~10s of
+            # receiving nothing. Suppressing the agent's own audio therefore
+            # kills the connection during any long agent turn -- and the
+            # milestone read-back is ~30 SECONDS of continuous speech. A
+            # KeepAlive costs nothing and is not billed as audio.
+            await self._keepalive()
             return
         try:
             await self._ws.send(pcm16)
+            self._last_sent = time.monotonic()
         except Exception:
             self._closed = True
+
+    async def _keepalive(self) -> None:
+        now = time.monotonic()
+        if now - self._last_sent < self._keepalive_s:
+            return
+        try:
+            await self._ws.send(json.dumps({"type": "KeepAlive"}))
+            self._last_sent = now
+        except Exception:
+            self._closed = True
+
+    async def finalize(self) -> None:
+        """Flush pending audio and ask for the final transcript now.
+
+        Without this, a caller that stops sending audio waits for Deepgram's
+        endpointing and then for its idle timeout -- which is how `test-ai` hit
+        1011 while sitting in wait_for() after the last frame.
+        """
+        if self._ws and not self._closed:
+            try:
+                await self._ws.send(json.dumps({"type": "Finalize"}))
+            except Exception:
+                self._closed = True
 
     async def close(self) -> None:
         self._closed = True
