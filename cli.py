@@ -263,6 +263,9 @@ def test_ai(
             async for kind, txt in stt.events():
                 if kind == "final" and txt:
                     if not heard:
+                        # Perceived latency = from the moment the caller STOPS
+                        # talking to the transcript arriving. Measuring from the
+                        # start of speech just re-reports the clip's duration.
                         results["stt_latency"] = (time.monotonic() - t0) * 1000
                     # Streaming engines emit incremental finals; keep a few for
                     # display and stop, or a chatty one floods the terminal.
@@ -271,9 +274,19 @@ def test_ai(
 
         task = aio.create_task(listen())
         step = 16000 * 2 * 20 // 1000           # 20 ms of 16-bit 16 kHz
+        audio_secs = len(pcm16) / 2 / 16000
+        wall0 = time.monotonic()
         for i in range(0, len(pcm16), step):
             await stt.send_audio(pcm16[i:i + step])
-            await aio.sleep(0.002)              # faster than real time
+            # REAL TIME, deliberately. Feeding 10x faster made every streaming
+            # engine look terrible: it piles all the compute into a burst AFTER
+            # the speech, when the entire point of streaming is that the work
+            # happens DURING it. For a batch engine the two are identical, which
+            # is why this went unnoticed until a streaming engine arrived.
+            await aio.sleep(0.02)
+        sent_at = time.monotonic()
+        results["_audio_secs"] = audio_secs
+        results["_fed_wall"] = sent_at - wall0
         try:
             await aio.wait_for(task, timeout=25)
         except aio.TimeoutError:
@@ -309,14 +322,18 @@ def test_ai(
                     async for kind, txt in stt2.events():
                         if kind == "final" and txt:
                             if warm_stt is None:
-                                warm_stt = (time.monotonic() - t2) * 1000
+                                # From end-of-audio, not start. This is what the
+                                # caller waits through after they stop speaking.
+                                warm_stt = (time.monotonic() - fed_at) * 1000
                             heard2.append(txt)
                             break
 
                 task2 = aio.create_task(listen2())
+                compute0 = time.monotonic()
                 for i in range(0, len(pcm16), step):
                     await stt2.send_audio(pcm16[i:i + step])
-                    await aio.sleep(0.002)
+                    await aio.sleep(0.02)          # real time
+                fed_at = time.monotonic()
                 try:
                     await aio.wait_for(task2, timeout=25)
                 except aio.TimeoutError:
@@ -324,10 +341,19 @@ def test_ai(
                 await stt2.close()
 
                 if warm_stt is not None:
-                    results["stt_latency"] = warm_stt
+                    results["stt_latency"] = max(warm_stt, 0.0)
+                    audio_secs = results.get("_audio_secs", 0) or 0
+                    compute_s = time.monotonic() - compute0
+                    rtf = (compute_s / audio_secs) if audio_secs else 0
                     console.print(
-                        f"  [green]warm[/] second pass in [bold]{warm_stt:.0f} ms[/] "
-                        f"[dim](model already resident — this is the real per-turn cost)[/]"
+                        f"  [green]warm[/] [bold]{results['stt_latency']:.0f} ms[/] after "
+                        f"end-of-speech [dim](what the caller waits)[/]"
+                    )
+                    console.print(
+                        f"  [dim]RTF {rtf:.2f} — {compute_s:.1f}s of compute for "
+                        f"{audio_secs:.1f}s of audio. Under 1.0 means a streaming "
+                        f"engine keeps up live, so the work overlaps the caller "
+                        f"talking instead of following it.[/]"
                     )
             except Exception as e:
                 console.print(f"  [dim]warm STT pass skipped: {type(e).__name__}[/]")
@@ -369,11 +395,28 @@ def test_ai(
                 "A GPU for Whisper is the biggest single win."
             )
         else:
+            # Name the stage that is actually slowest, from the numbers just
+            # measured. Blaming STT unconditionally was wrong the moment STT got
+            # fast, and it would have sent someone optimising the wrong thing.
+            worst, ms = max(
+                (("STT", results.get("stt_latency", 0.0)),
+                 ("LLM", results.get("llm_first_chunk", 0.0)),
+                 ("TTS", results.get("tts_first_byte", 0.0))),
+                key=lambda kv: kv[1],
+            )
+            advice = {
+                "STT": "Check the RTF line above. Under 1.0 means a streaming engine "
+                       "keeps up live, so most of what remains is the endpointing "
+                       "wait — tune STT_SILENCE_MS, not the model.",
+                "LLM": "Set ANTHROPIC_MODEL=claude-haiku-4-5-20251001 and enable "
+                       "prompt caching. The system prompt and tool schemas are "
+                       "resent every turn and are the bulk of the input.",
+                "TTS": "Piper is normally 150-250 ms. If it is the worst stage, "
+                       "suspect the voice file or a sample-rate mismatch.",
+            }[worst]
             console.print(
-                "[red]Too slow — callers will talk over the agent.[/]\n"
-                "Biggest lever is STT: Whisper on CPU is the usual culprit. Either put "
-                "a GPU behind it\n(WHISPER_DEVICE=cuda) or use a streaming STT service "
-                "for that stage only."
+                f"[red]Too slow — callers will talk over the agent.[/]\n"
+                f"Slowest stage is [bold]{worst}[/] at {ms:.0f} ms. {advice}"
             )
         console.print(
             "[dim]Note: this excludes network and jitter on a real call — add ~100 ms.[/]"
