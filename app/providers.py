@@ -322,6 +322,28 @@ class DeepgramSTT(STTProvider):
     async def events(self) -> AsyncIterator[tuple[str, str]]:
         if not self._ws:
             raise RuntimeError("connect() first")
+        # A closed socket is END OF STREAM, not a failure. Letting
+        # ConnectionClosed propagate pushed a websockets exception up through the
+        # pipeline and out of `test-ai` as a traceback -- and on a live call it
+        # would kill the turn handler when the call simply ended. Deepgram also
+        # closes with 1011 after ~10s of idle, which is expected whenever the
+        # caller has stopped talking and we are waiting.
+        import websockets.exceptions as _wse
+        try:
+            async for raw in self._iter_ws():
+                yield raw
+        except _wse.ConnectionClosedOK:
+            log.info("deepgram stream closed")
+        except _wse.ConnectionClosedError as e:
+            # 1011 with "did not receive audio" is an idle timeout, not a fault.
+            if "timeout window" in str(e):
+                log.info("deepgram closed on idle timeout (no audio to send)")
+            else:
+                log.warning("deepgram closed unexpectedly: %s", e)
+        finally:
+            self._closed = True
+
+    async def _iter_ws(self) -> AsyncIterator[tuple[str, str]]:
         async for raw in self._ws:
             if isinstance(raw, bytes):
                 continue

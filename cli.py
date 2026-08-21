@@ -283,6 +283,10 @@ def test_ai(
                     # display and stop, or a chatty one floods the terminal.
                     if len(heard) < 8 and txt not in heard:
                         heard.append(txt)
+                    # STOP once we have a result. Continuing to iterate meant
+                    # waiting for the socket to die of idleness, which is how a
+                    # successful transcription still ended in a 1011 traceback.
+                    return
 
         task = aio.create_task(listen())
         step = 16000 * 2 * 20 // 1000           # 20 ms of 16-bit 16 kHz
