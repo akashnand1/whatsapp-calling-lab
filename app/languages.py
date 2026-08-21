@@ -46,9 +46,15 @@ class LanguageSpec:
     # the caller is still talking, instead of a 5.5s batch decode after they
     # stop) and covers en/ar/ru/hi/tr. It does NOT cover Kazakh, which falls
     # back to Whisper.
-    #   "nemotron" -> streaming, low latency, better WER where supported
-    #   "whisper"  -> batch decode, broader language coverage
-    stt_engine: str = "nemotron"
+    #   "deepgram" -> cloud, sub-second, 6 of our 7 languages (VERIFIED)
+    #   "nemotron" -> self-hosted streaming; RTF 2.42 on CPU, so ~4s lag, but
+    #                 no third party sees the audio. The only Kazakh option.
+    #   "whisper"  -> self-hosted batch; same RTF as nemotron, worse accuracy
+    #
+    # Default is deepgram because measurement showed self-hosted CPU cannot
+    # stream (RTF 2.42 means ~4s of lag per turn no matter how many cores are
+    # added -- cores buy concurrency, not speed).
+    stt_engine: str = "deepgram"
 
     # Language to DECODE as, when it differs from the language we SPEAK.
     # Urdu is the case that matters: spoken Urdu and Hindi are the same language
@@ -58,9 +64,20 @@ class LanguageSpec:
     # instructed to reply in Urdu script regardless.
     stt_lang: str = ""       # empty -> same as `code`
 
+    # Deepgram language parameter. Usually the same as `code`, but distinct
+    # because Deepgram's "multi" code-switching model is a DIFFERENT set of ten
+    # languages (en es fr de hi ru pt ja it nl). Hindi can use "multi" to handle
+    # Hinglish; Turkish, Arabic and Urdu are monolingual-only there -- and
+    # monolingual is also cheaper ($0.0048 vs $0.0058/min).
+    deepgram_lang: str = ""  # empty -> same as decode_lang
+
     @property
     def decode_lang(self) -> str:
         return self.stt_lang or self.code
+
+    @property
+    def dg_lang(self) -> str:
+        return self.deepgram_lang or self.decode_lang
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +204,14 @@ LANGUAGES: dict[str, LanguageSpec] = {
             "Devanagari only. Piper's Hindi voice spells Latin script out letter "
             "by letter, so 'TruKKer' must be written ट्रकर."
         ),
+        # "multi" rather than "hi": drivers say "load", "pickup" and "border"
+        # in English mid-sentence, and multi is Deepgram's code-switching model
+        # (which does include Hindi). Costs $0.0058/min instead of $0.0048.
+        deepgram_lang="multi",
         stt_quality=(
-            "Whisper 'small' manages roughly 60-70% on accented Hindi over a "
-            "phone line. This is the current accuracy ceiling -- see FINDINGS.md."
+            "Deepgram nova-3 with the multi model, for Hinglish code-switching. "
+            "Self-hosted fallbacks: Nemotron is accurate but ~4s (RTF 2.42 on "
+            "CPU); Whisper 'small' manages only 60-70% -- see FINDINGS.md."
         ),
     ),
     "tr": LanguageSpec(
@@ -282,17 +304,15 @@ LANGUAGES: dict[str, LanguageSpec] = {
             "loanwords like لوڈ, پک اپ, بارڈر are normal and correct -- do not "
             "substitute formal Persian or Arabic vocabulary for them."
         ),
-        # Nemotron DOES support Urdu natively: its prompt_dictionary contains
-        # "ur-PK". The HuggingFace language tags omit it, which is why an earlier
-        # version of this file decoded Urdu as Hindi as a workaround -- correct
-        # reasoning (they are one spoken language) but unnecessary, and it would
-        # have returned Devanagari instead of Urdu script for no benefit.
-        # Lesson: read the checkpoint, not the metadata.
-        stt_engine="nemotron",
+        # Deepgram supports Urdu natively as "ur" (verified in their Nova-3
+        # language list), so it needs no workaround. Nemotron also has it as
+        # "ur-PK" in its prompt_dictionary -- worth knowing, because that makes
+        # Urdu the one language with a real self-hosted fallback that is not
+        # Whisper. Earlier I decoded Urdu as Hindi, which was sound reasoning
+        # (one spoken language, two scripts) but simply unnecessary.
         stt_quality=(
-            "Supported natively by Nemotron as ur-PK, so streaming applies. "
-            "Set STT_ENGINE=whisper to compare if Perso-Arabic names transcribe "
-            "poorly."
+            "Deepgram nova-3 monolingual 'ur' (the cheaper tier). Self-hosted "
+            "fallback is Nemotron as ur-PK, which is better than Whisper here."
         ),
     ),
     "kk": LanguageSpec(
@@ -318,6 +338,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         # Kazakh is absent from Nemotron's 35 languages, so it is the one
         # language that cannot have streaming ASR. It stays on Whisper and will
         # therefore feel slower AND less accurate than the other six.
+        # Kazakh is in NEITHER Deepgram's language list NOR Nemotron's prompt
+        # dictionary. Whisper is the only engine that covers it at all.
         stt_engine="whisper",
         stt_quality=(
             "WEAKEST of the seven. Not covered by Nemotron, so no streaming: "

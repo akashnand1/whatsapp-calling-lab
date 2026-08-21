@@ -211,31 +211,62 @@ class LLMProvider(ABC):
 class DeepgramSTT(STTProvider):
     """Cloud STT. Best endpointing available; caller audio leaves your network."""
 
-    URL = (
-        "wss://api.deepgram.com/v1/listen"
-        "?model=nova-2-general&encoding=linear16&sample_rate=16000&channels=1"
-        "&punctuate=true&interim_results=true&endpointing=250"
-        "&utterance_end_ms=1000&vad_events=true&language=multi"
-    )
-
     def __init__(self) -> None:
-        self._key = get_settings().deepgram_api_key
+        s = get_settings()
+        self._key = s.deepgram_api_key
         self._ws = None
         self._closed = False
+
+        from .languages import spec
+        lang = spec(s.agent_language)
+        # Language comes from the registry, per language. The previous version
+        # hardcoded `model=nova-2-general&language=multi`, and nova-2's "multi"
+        # is SPANISH + ENGLISH ONLY -- so Hindi audio would have been decoded as
+        # Spanish and returned confident nonsense. nova-3's "multi" is the
+        # ten-language code-switching model that does include Hindi.
+        self._lang = lang.dg_lang if lang else "en"
+        self._model = s.deepgram_model
+        self.URL = (
+            "wss://api.deepgram.com/v1/listen"
+            f"?model={self._model}"
+            "&encoding=linear16&sample_rate=16000&channels=1"
+            "&punctuate=true&interim_results=true"
+            f"&endpointing={s.deepgram_endpointing_ms}"
+            f"&utterance_end_ms={s.deepgram_utterance_end_ms}"
+            f"&vad_events=true&language={self._lang}"
+        )
+
+        # Echo suppression. Deepgram does its own endpointing, so we do not need
+        # the SpeechGate for turn detection -- but we DO need to stop the agent's
+        # own voice being transcribed off a speakerphone. This class had no
+        # gating at all, so the agent would have answered itself. Suppressing
+        # also stops us paying Deepgram per-minute for our own audio.
+        self._tail = 0
+        self._tail_frames = 20            # 400 ms at 20 ms/frame
 
     async def connect(self) -> None:
         import websockets
         self._ws = await websockets.connect(
             self.URL, additional_headers={"Authorization": f"Token {self._key}"}
         )
-        log.info("STT: deepgram connected")
+        log.info(
+            "STT: deepgram connected — model=%s language=%s", self._model, self._lang
+        )
 
     async def send_audio(self, pcm16: bytes) -> None:
-        if self._ws and not self._closed:
-            try:
-                await self._ws.send(pcm16)
-            except Exception:
-                self._closed = True
+        if not self._ws or self._closed:
+            return
+        # Do not forward our own playback. Costs money and gets transcribed.
+        if self.agent_speaking:
+            self._tail = self._tail_frames
+            return
+        if self._tail > 0:
+            self._tail -= 1
+            return
+        try:
+            await self._ws.send(pcm16)
+        except Exception:
+            self._closed = True
 
     async def close(self) -> None:
         self._closed = True
@@ -992,22 +1023,43 @@ class PiperLocalTTS(TTSProvider):
 # ===========================================================================
 
 def make_stt() -> STTProvider:
-    s = _s()
-    name = s.stt_provider.lower()
-    if name == "deepgram":
-        return DeepgramSTT()
-    if name != "whisper_local":
-        raise ValueError(f"unknown STT_PROVIDER={name}")
+    """Pick a recogniser for the CONFIGURED LANGUAGE.
 
-    # Local STT is now TWO engines, chosen per language. Nemotron is cache-aware
-    # streaming and much faster and more accurate where it is supported, but it
-    # does not cover Kazakh -- so the choice belongs to the language, not to a
-    # single global switch. STT_ENGINE overrides it for A/B testing.
+    Three engines, and no single one covers all seven languages:
+      deepgram  cloud, sub-second, verified for en/hi/tr/ru/ar/ur (NOT Kazakh)
+      nemotron  self-hosted streaming, accurate, but RTF 2.42 on CPU (~4s lag)
+      whisper   self-hosted batch, same RTF, worse accuracy — the Kazakh path
+
+    STT_ENGINE=auto (the intent) lets each language choose from
+    app/languages.py. Setting it explicitly forces one engine everywhere, which
+    is how you A/B a language against a different recogniser.
+    """
+    s = _s()
     from .languages import spec
     lang = spec(s.agent_language)
+
     want = s.stt_engine.lower()
     if want == "auto":
-        want = lang.stt_engine if lang else "whisper"
+        # STT_PROVIDER is legacy: it predates per-language routing. Honour it
+        # only as a global override so old .env files keep working.
+        legacy = s.stt_provider.lower()
+        if legacy == "deepgram":
+            want = "deepgram"
+        else:
+            want = lang.stt_engine if lang else "whisper"
+
+    if want == "deepgram":
+        if not s.deepgram_api_key:
+            log.error(
+                "AGENT_LANGUAGE=%s routes to Deepgram but DEEPGRAM_API_KEY is "
+                "unset. Falling back to self-hosted, which is ~4s slower per "
+                "turn. Get a key (free $200 credit, no card) at "
+                "console.deepgram.com/signup",
+                s.agent_language,
+            )
+            want = "nemotron" if (lang and lang.code != "kk") else "whisper"
+        else:
+            return DeepgramSTT()
 
     if want == "nemotron":
         # Probe for the dependency HERE, not by catching ImportError around the
@@ -1078,12 +1130,17 @@ def describe_stack() -> dict[str, str]:
     # two engines chosen per language. Reporting it unqualified would hide the
     # single most important performance fact about a call -- whether that
     # language is streaming or doing 5.5-second batch decodes.
-    if stt == "whisper_local":
-        from .languages import spec
-        lang = spec(s.agent_language)
-        want = s.stt_engine.lower()
-        if want == "auto":
-            want = lang.stt_engine if lang else "whisper"
+    from .languages import spec
+    lang = spec(s.agent_language)
+    want = s.stt_engine.lower()
+    if want == "auto":
+        want = ("deepgram" if s.stt_provider.lower() == "deepgram"
+                else (lang.stt_engine if lang else "whisper"))
+    if want == "deepgram" and not s.deepgram_api_key:
+        stt = "deepgram wanted but DEEPGRAM_API_KEY unset -> self-hosted fallback"
+    elif want == "deepgram":
+        stt = f"deepgram {s.deepgram_model} language={lang.dg_lang if lang else 'en'}"
+    else:
         import importlib.util
         have_nemo = importlib.util.find_spec("nemo") is not None
         if want == "nemotron" and have_nemo:
@@ -1109,7 +1166,8 @@ def describe_stack() -> dict[str, str]:
     # "?" where it should say the audio stays on your hardware -- and that column
     # is the whole point of this function for the data-residency question.
     stt_base = (
-        "nemotron_streaming" if stt.startswith("nemotron")
+        "deepgram" if stt.startswith("deepgram")
+        else "nemotron_streaming" if stt.startswith("nemotron")
         else "whisper_local" if stt.startswith("whisper_local")
         else stt
     )

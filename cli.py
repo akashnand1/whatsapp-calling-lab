@@ -66,7 +66,16 @@ def test_ai(
       over  1.5 s    callers start talking over the agent
     """
     import asyncio as aio
+    import logging as _logging
+
     import numpy as np
+
+    # cli.py never configured logging, so every log.info() in the providers went
+    # nowhere -- including the thread-count and per-utterance diagnostics that
+    # exist precisely to explain a slow result. Only warnings got through, which
+    # is why the picture was always partial.
+    _logging.basicConfig(level=_logging.INFO, format="%(name)-9s %(message)s")
+    _logging.getLogger("nemo_logger").setLevel(_logging.WARNING)   # NeMo is very chatty
 
     from app.config import get_settings as _gs0
     from app.providers import describe_stack, make_llm, make_stt, make_tts
@@ -358,17 +367,27 @@ def test_ai(
                     # "instant" for an engine that cannot keep up -- the most
                     # flattering possible reading of the worst possible result.
                     behind = warm_stt < 0
-                    results["stt_latency"] = abs(warm_stt) if behind else warm_stt
+                    if behind:
+                        # The honest wait when the engine cannot keep up is the
+                        # BACKLOG: compute minus audio duration. Reporting the
+                        # small negative gap as "121 ms" made a 2.4x shortfall
+                        # look like the best number in the table.
+                        results["stt_latency"] = max(
+                            (time.monotonic() - compute0 - (results.get("_audio_secs") or 0)) * 1000,
+                            0.0,
+                        )
+                    else:
+                        results["stt_latency"] = warm_stt
                     audio_secs = results.get("_audio_secs", 0) or 0
                     compute_s = time.monotonic() - compute0
                     rtf = (compute_s / audio_secs) if audio_secs else 0
                     if behind:
                         console.print(
-                            f"  [red]BEHIND REAL TIME[/] — the transcript arrived "
-                            f"{results['stt_latency']:.0f} ms before the audio "
-                            f"finished feeding, because send_audio() blocked on "
-                            f"the forward pass. The engine cannot keep up, so the "
-                            f"backlog grows with every second the caller talks."
+                            f"  [red]BEHIND REAL TIME[/] — send_audio() blocked on "
+                            f"the forward pass, so the engine never caught up. The "
+                            f"caller waits about [bold]{results['stt_latency']:.0f} ms[/] "
+                            f"of backlog after they stop talking, and that grows "
+                            f"with every second they speak."
                         )
                     else:
                         console.print(

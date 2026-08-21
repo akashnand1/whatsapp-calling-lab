@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     # app/languages.py, because no single model covers all seven. Force
     # "whisper" or "nemotron" to A/B one language against the other engine.
     stt_engine: str = "auto"
+    # nova-3 is the current generation. Do NOT use nova-2 with language=multi:
+    # that combination is Spanish+English only and will silently mis-transcribe
+    # every other language.
+    deepgram_model: str = "nova-3"
+    # Deepgram's own endpointing, in ms. It replaces our SpeechGate's turn
+    # detection for cloud STT, and being model-side it is far better than an
+    # energy threshold. Their newer Flux model folds this into the model itself.
+    deepgram_endpointing_ms: int = 300
+    deepgram_utterance_end_ms: int = 1000
     # How much sustained silence ends a caller's turn. Shared by BOTH local
     # engines so a driver gets the same turn-taking whichever recogniser their
     # language routes to. 700ms cut people who paused to think; 1100 does not.
