@@ -138,7 +138,8 @@ class NemotronStreamingSTT(STTProvider):
         self._prev_pred = None
         self._step = 0
         self._buffer = None          # CacheAwareStreamingAudioBuffer
-        self._last_text = ""
+        self._last_text = ""         # last partial we emitted, to avoid repeats
+        self._utt_text = ""          # best transcript so far for THIS utterance
 
     # Rough resident cost measured on an 8 GB Codespace: NeMo + torch import is
     # ~1.5-2 GB, the 0.6B model in float32 is ~2.4 GB, and the .nemo archive is
@@ -259,6 +260,8 @@ class NemotronStreamingSTT(STTProvider):
         self._prev_hyp = None
         self._prev_pred = None
         self._step = 0
+        self._utt_text = ""
+        self._last_text = ""
         if self._buffer is None:
             self._buffer = self._build_buffer()
         else:
@@ -316,7 +319,11 @@ class NemotronStreamingSTT(STTProvider):
         t0 = time.monotonic()
         tail = bytes(self._buf)
         self._buf.clear()
-        text = await asyncio.to_thread(self._feed_and_drain, tail, True)
+        await asyncio.to_thread(self._feed_and_drain, tail, True)
+        # Use the accumulated utterance text, not just what the final call
+        # returned. The last chunk is usually trailing silence and decodes to ''.
+        text = self._utt_text
+        self._utt_text = ""
         took = (time.monotonic() - t0) * 1000
 
         if not text:
@@ -395,10 +402,25 @@ class NemotronStreamingSTT(STTProvider):
                     self._step += 1
                     if texts:
                         first = texts[0]
-                        text = (getattr(first, "text", None) or str(first)).strip()
+                        # NEVER fall back to str(hypothesis). `text` is legitimately
+                        # '' on a step that decoded nothing, and an earlier version
+                        # used `getattr(...) or str(first)` -- empty string is
+                        # falsy, so it printed the whole Hypothesis repr and
+                        # reported it upstream as a transcript. "I heard nothing"
+                        # became "I heard a tensor dump".
+                        got = (getattr(first, "text", "") or "").strip()
+                        # Keep the last NON-EMPTY result. RNNT accumulates the
+                        # hypothesis across steps via previous_hypotheses, and the
+                        # final chunk of an utterance is usually trailing silence,
+                        # which decodes to '' -- overwriting the real transcript.
+                        if got:
+                            text = got
         except Exception:
             log.exception("nemotron stream step failed")
             return ""
+
+        if text:
+            self._utt_text = text
         return text
 
     # -- events out --------------------------------------------------------
