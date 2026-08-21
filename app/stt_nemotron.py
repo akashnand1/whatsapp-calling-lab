@@ -138,6 +138,7 @@ class NemotronStreamingSTT(STTProvider):
         self._prev_pred = None
         self._step = 0
         self._buffer = None          # CacheAwareStreamingAudioBuffer
+        self._stream_id = None       # None until the stream exists; then 0
         self._last_text = ""         # last partial we emitted, to avoid repeats
         self._utt_text = ""          # best transcript so far for THIS utterance
 
@@ -262,6 +263,10 @@ class NemotronStreamingSTT(STTProvider):
         self._step = 0
         self._utt_text = ""
         self._last_text = ""
+        # reset_buffer() clears buffer AND streams_length, so the stream must be
+        # re-created with -1 on the next append. Forgetting this would append to
+        # stream 0 of a buffer that has no streams.
+        self._stream_id = None
         if self._buffer is None:
             self._buffer = self._build_buffer()
         else:
@@ -359,7 +364,21 @@ class NemotronStreamingSTT(STTProvider):
             # and produces the mel features the encoder actually wants.
             audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
             try:
-                self._buffer.append_audio(audio)
+                # stream_id matters enormously and the default is wrong for us.
+                # From append_processed_signal(): with stream_id < 0 and a buffer
+                # that already exists, it pads a NEW BATCH ROW and appends there.
+                # That method is built for batching separate audio FILES. Calling
+                # it repeatedly with the default turned every 1.12s chunk into its
+                # own independent stream while the encoder cache stayed sized for
+                # one -- which decoded "फ्र" out of a six-word sentence.
+                #
+                # So: -1 to CREATE the stream, then 0 to CONTINUE it. Appending
+                # with 0 writes at streams_length[0], i.e. onward in time.
+                if self._stream_id is None:
+                    _, _, sid = self._buffer.append_audio(audio, stream_id=-1)
+                    self._stream_id = 0 if sid < 0 else sid
+                else:
+                    self._buffer.append_audio(audio, stream_id=self._stream_id)
             except Exception:
                 log.exception("nemotron: could not append audio to the stream buffer")
                 return ""
