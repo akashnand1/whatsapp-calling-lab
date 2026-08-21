@@ -197,6 +197,73 @@ call if they disagree — the failure mode that cost two rounds of debugging.
 
 ---
 
+## After testing: DELETE the codespace
+
+Verified against GitHub's billing docs (20 Aug 2026):
+
+| | Free quota | How it is consumed |
+|---|---|---|
+| Compute | 120 hrs/month | ×4 multiplier on a 4-core machine, so **30 wall-clock hours** |
+| Storage | 15 GB-month | accrues hourly for as long as the codespace **EXISTS** |
+
+**Stopping is not enough.** Stopping ends compute billing; storage keeps
+accruing. With `nemo_toolkit`, torch, the 2.37 GB `.nemo`, Whisper and the Piper
+voices, this codespace is roughly 15-25 GB — left stopped for a month that alone
+exceeds the 15 GB quota. Deleting is the only thing that stops storage.
+
+There is a hard safety net: *"If your account does not have a valid payment
+method on file, usage is blocked once you use up your quota."* With no card on
+file you cannot be charged — usage simply stops.
+
+### Before deleting
+
+1. **Make the Anthropic key permanent** so you never re-paste it:
+   <https://github.com/settings/codespaces> → New secret → `ANTHROPIC_API_KEY`
+   → grant to this repo. Account-level, survives deletion.
+2. **Push your code.** `.env` is gitignored and will be lost, which is fine —
+   everything in it is either in `.env.example`, reproducible
+   (`WA_PHONE_NUMBER_ID=919208021266743`, `WA_WEBHOOK_VERIFY_TOKEN=trukker-lab-8f2a9c`),
+   or expires anyway (the WhatsApp token lasts 24 h).
+
+### Deleting
+
+<https://github.com/codespaces> → `⋯` → **Delete**. Or from the Mac:
+
+```bash
+gh codespace list
+gh codespace delete -c <codespace-name>
+```
+
+Confirm storage has dropped to zero at <https://github.com/settings/billing>.
+
+Recreating costs ~5 minutes plus the model downloads, so delete after a testing
+session rather than between two runs on the same day.
+
+## What a call actually costs
+
+Both figures verified 20 Aug 2026. Every call now logs its real cost beside the
+transcript, from the API's own token counts rather than an estimate:
+
+```
+cost: LLM $0.384 (24 turns, 168000 in / 4800 out / 0 cached)
+      + WhatsApp $0.146 (11.5 min) = $0.530
+```
+
+| Setup | LLM | WhatsApp | Total |
+|---|---|---|---|
+| Sonnet 5, no caching, 11.5 min | $0.384 | $0.146 | **$0.53** |
+| Sonnet 5 + prompt caching, 4 min | $0.159 | $0.051 | $0.21 |
+| Haiku 4.5 + caching, 4 min | $0.080 | $0.051 | **$0.13** |
+
+Prices: Sonnet 5 $2/$10 per MTok, Haiku 4.5 $1/$5, cache reads 10% of input.
+WhatsApp calling to a UAE number is $0.0127/min in 6-second pulses.
+
+Nothing else in the stack costs money: Whisper, Nemotron, Piper and the voices
+are self-hosted, Cloudflare's STUN is public, and Codespaces port-forwarding
+replaced ngrok.
+
+---
+
 ## If it is still silent
 
 Look at the server log for the candidate pair:

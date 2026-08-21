@@ -66,13 +66,27 @@ def _pick_prompt_key(model, want: str) -> str:
     (which makes the model detect the language itself -- measurably worse than
     telling it, per NVIDIA's own LangID-vs-auto comparison, but never wrong).
     """
+    # The dictionary is NOT an attribute on the model -- looking only at
+    # `model.prompt_dictionary` found nothing and silently fell back to 'auto',
+    # throwing away the accuracy that an explicit language ID buys. It actually
+    # lives inside the dataset configs, so check all the places it can be.
     keys: list[str] = []
-    try:
-        pd = getattr(model, "prompt_dictionary", None)
-        if pd:
-            keys = list(pd.keys() if hasattr(pd, "keys") else pd)
-    except Exception:
-        keys = []
+    candidates = [
+        lambda: model.prompt_dictionary,
+        lambda: model.cfg.train_ds.prompt_dictionary,
+        lambda: model.cfg.validation_ds.prompt_dictionary,
+        lambda: model.cfg.test_ds.prompt_dictionary,
+        lambda: model._cfg.train_ds.prompt_dictionary,
+    ]
+    for get in candidates:
+        try:
+            pd = get()
+            if pd:
+                keys = list(pd.keys() if hasattr(pd, "keys") else pd)
+                if keys:
+                    break
+        except Exception:
+            continue
 
     if not keys:
         log.warning("nemotron: no prompt_dictionary found; using 'auto' language detection")
@@ -123,6 +137,8 @@ class NemotronStreamingSTT(STTProvider):
         self._prev_hyp = None
         self._prev_pred = None
         self._step = 0
+        self._buffer = None          # CacheAwareStreamingAudioBuffer
+        self._last_text = ""
 
     # Rough resident cost measured on an 8 GB Codespace: NeMo + torch import is
     # ~1.5-2 GB, the 0.6B model in float32 is ~2.4 GB, and the .nemo archive is
@@ -206,6 +222,36 @@ class NemotronStreamingSTT(STTProvider):
         # compute dtype on cache-aware models.
         return model.to(dtype=torch.float32)
 
+    def _build_buffer(self):
+        """The buffer is what turns raw audio into what the encoder expects.
+
+        This is the bug that cost the first run. `conformer_stream_step` takes
+        `processed_signal` -- MEL FEATURES of shape (batch, dim, time) -- not raw
+        samples. Feeding it a waveform produced:
+
+            Input shape expected = (batch, dimension, time)
+            Input shape found : torch.Size([1, 3840])
+
+        CacheAwareStreamingAudioBuffer owns all of that: it runs the model's own
+        preprocessor, splits on the encoder's declared chunk_size/shift_size, and
+        prepends the pre-encode cache frames each chunk needs. Hand-rolling any
+        of it means silently wrong features even once the shapes match.
+        """
+        from nemo.collections.asr.parts.utils.streaming_utils import (
+            CacheAwareStreamingAudioBuffer,
+        )
+        # Online normalisation is required for real streaming: batch statistics
+        # cannot be computed from audio that has not arrived yet. Only enable it
+        # when the model actually normalises, or it is a no-op that logs noise.
+        online = False
+        try:
+            online = self._model.cfg.preprocessor.normalize in ("per_feature", "all_feature")
+        except Exception:
+            pass
+        return CacheAwareStreamingAudioBuffer(
+            model=self._model, online_normalization=online, pad_and_drop_preencoded=False
+        )
+
     def _reset_stream(self) -> None:
         if self._model is None:
             return
@@ -213,6 +259,10 @@ class NemotronStreamingSTT(STTProvider):
         self._prev_hyp = None
         self._prev_pred = None
         self._step = 0
+        if self._buffer is None:
+            self._buffer = self._build_buffer()
+        else:
+            self._buffer.reset_buffer()
 
     async def close(self) -> None:
         if self._task:
@@ -245,21 +295,28 @@ class NemotronStreamingSTT(STTProvider):
             await self._flush(self._utterance)
 
     async def _maybe_step(self) -> None:
-        """Run one streaming step once a full chunk has accumulated."""
+        """Hand accumulated audio to the buffer, then drain whatever it yields.
+
+        Chunk sizing is the buffer's job, not ours: it reads chunk_size and
+        shift_size off the encoder's own streaming_cfg. An earlier version cut
+        fixed 1.12s slices by hand, which is both the wrong size and missing the
+        pre-encode cache frames each chunk needs.
+        """
         need = int(STT_RATE_LOCAL * get_settings().nemotron_chunk_s) * 2  # int16
         if len(self._buf) < need:
             return
-        chunk = bytes(self._buf[:need])
-        del self._buf[:need]
-        text = await asyncio.to_thread(self._step_sync, chunk, False)
-        if text:
+        pcm = bytes(self._buf)
+        self._buf.clear()
+        text = await asyncio.to_thread(self._feed_and_drain, pcm, False)
+        if text and text != self._last_text:
+            self._last_text = text
             await self._out.put(("partial", text))
 
     async def _flush(self, seq: int) -> None:
         t0 = time.monotonic()
         tail = bytes(self._buf)
         self._buf.clear()
-        text = await asyncio.to_thread(self._step_sync, tail, True) if tail else ""
+        text = await asyncio.to_thread(self._feed_and_drain, tail, True)
         took = (time.monotonic() - t0) * 1000
 
         if not text:
@@ -278,54 +335,71 @@ class NemotronStreamingSTT(STTProvider):
         await self._out.put(("final", text))
         await self._out.put(("utterance_end", ""))
 
-    def _step_sync(self, pcm: bytes, last: bool) -> str:
-        """One conformer_stream_step. Runs in a thread: it is a torch forward
-        pass, and on the event loop it stalls the WebRTC media pump, which
-        corrupts the very audio we are trying to transcribe."""
+    def _feed_and_drain(self, pcm: bytes, last: bool) -> str:
+        """Append raw audio, then run every feature chunk the buffer will give.
+
+        Runs in a thread: these are torch forward passes, and on the event loop
+        they stall the WebRTC media pump, which corrupts the very audio we are
+        trying to transcribe.
+        """
         import torch
 
-        if self._model is None or not pcm:
+        if self._model is None or self._buffer is None:
             return ""
-        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        sig = torch.from_numpy(audio).unsqueeze(0)
-        sig_len = torch.tensor([sig.shape[1]], dtype=torch.long)
 
-        cache_last_channel, cache_last_time, cache_last_channel_len = self._cache
+        if pcm:
+            # int16 -> float32 in [-1, 1]; the preprocessor expects a waveform
+            # and produces the mel features the encoder actually wants.
+            audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            try:
+                self._buffer.append_audio(audio)
+            except Exception:
+                log.exception("nemotron: could not append audio to the stream buffer")
+                return ""
+
+        text = ""
         try:
             with torch.inference_mode():
-                (
-                    self._prev_pred,
-                    texts,
-                    cache_last_channel,
-                    cache_last_time,
-                    cache_last_channel_len,
-                    self._prev_hyp,
-                ) = self._model.conformer_stream_step(
-                    processed_signal=sig,
-                    processed_signal_length=sig_len,
-                    cache_last_channel=cache_last_channel,
-                    cache_last_time=cache_last_time,
-                    cache_last_channel_len=cache_last_channel_len,
-                    keep_all_outputs=last,
-                    previous_hypotheses=self._prev_hyp,
-                    previous_pred_out=self._prev_pred,
-                    drop_extra_pre_encoded=(
-                        0 if self._step == 0
-                        else self._model.encoder.streaming_cfg.drop_extra_pre_encoded
-                    ),
-                    return_transcription=True,
-                )
+                # Iterating the buffer resumes from its own buffer_idx, so this
+                # picks up exactly where the previous call stopped.
+                for chunk, chunk_len in self._buffer:
+                    cache_ch, cache_t, cache_len = self._cache
+                    (
+                        self._prev_pred,
+                        texts,
+                        cache_ch,
+                        cache_t,
+                        cache_len,
+                        self._prev_hyp,
+                    ) = self._model.conformer_stream_step(
+                        processed_signal=chunk,
+                        processed_signal_length=chunk_len,
+                        cache_last_channel=cache_ch,
+                        cache_last_time=cache_t,
+                        cache_last_channel_len=cache_len,
+                        # Only the FINAL chunk of an utterance keeps trailing
+                        # outputs; asking for them mid-stream duplicates tokens.
+                        keep_all_outputs=(last and self._buffer.is_buffer_empty()),
+                        previous_hypotheses=self._prev_hyp,
+                        previous_pred_out=self._prev_pred,
+                        # Step 0 has no cache to drop; every later step must drop
+                        # the pre-encode frames the buffer prepended, or they are
+                        # decoded twice.
+                        drop_extra_pre_encoded=(
+                            0 if self._step == 0
+                            else self._model.encoder.streaming_cfg.drop_extra_pre_encoded
+                        ),
+                        return_transcription=True,
+                    )
+                    self._cache = (cache_ch, cache_t, cache_len)
+                    self._step += 1
+                    if texts:
+                        first = texts[0]
+                        text = (getattr(first, "text", None) or str(first)).strip()
         except Exception:
             log.exception("nemotron stream step failed")
             return ""
-
-        self._cache = (cache_last_channel, cache_last_time, cache_last_channel_len)
-        self._step += 1
-
-        if not texts:
-            return ""
-        first = texts[0]
-        return (getattr(first, "text", None) or str(first)).strip()
+        return text
 
     # -- events out --------------------------------------------------------
     async def events(self) -> AsyncIterator[tuple[str, str]]:

@@ -332,9 +332,13 @@ def test_ai(
             except Exception as e:
                 console.print(f"  [dim]warm STT pass skipped: {type(e).__name__}[/]")
         else:
+            # Name the engine that actually ran. Saying "with whisper_local" while
+            # nemotron was configured sent me looking in the wrong file.
+            engine = describe_stack()["stt"].split()[0]
             console.print(
-                "  [yellow]no transcript[/] — with whisper_local this can mean the "
-                "audio was too short or too quiet. Try --text with a longer phrase."
+                f"  [yellow]no transcript[/] from [bold]{engine}[/] — the audio may "
+                "have been too short or too quiet, or the engine errored above. "
+                "Scroll up for a traceback before assuming it was the audio."
             )
 
     _run(go())
