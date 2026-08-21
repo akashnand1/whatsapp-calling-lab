@@ -259,14 +259,17 @@ def test_ai(
         t0 = time.monotonic()
         heard: list[str] = []
 
+        # Record WHEN the first final arrived; do the arithmetic later. Closing
+        # over a variable assigned after the task starts raises NameError inside
+        # the task -- which is exactly what happened, and it silently fell back
+        # to a meaningless number instead of failing loudly.
+        first_at: list[float] = []
+
         async def listen() -> None:
             async for kind, txt in stt.events():
                 if kind == "final" and txt:
-                    if not heard:
-                        # Perceived latency = from the moment the caller STOPS
-                        # talking to the transcript arriving. Measuring from the
-                        # start of speech just re-reports the clip's duration.
-                        results["stt_latency"] = (time.monotonic() - t0) * 1000
+                    if not first_at:
+                        first_at.append(time.monotonic())
                     # Streaming engines emit incremental finals; keep a few for
                     # display and stop, or a chatty one floods the terminal.
                     if len(heard) < 8 and txt not in heard:
@@ -293,6 +296,12 @@ def test_ai(
             task.cancel()
         await stt.close()
 
+        # Latency the CALLER experiences: end of their speech -> transcript.
+        # Measuring from the start of the clip just re-reports its duration,
+        # which is why this read 6054ms for 3.4s of audio.
+        if first_at:
+            results["stt_latency"] = max((first_at[0] - sent_at) * 1000, 0.0)
+
         if heard:
             console.print(
                 f"  [green]OK[/] transcript in [bold]{results.get('stt_latency', 0):.0f} ms[/] "
@@ -317,14 +326,13 @@ def test_ai(
                 warm_stt: float | None = None
                 heard2: list[str] = []
 
+                first_at2: list[float] = []
+
                 async def listen2() -> None:
-                    nonlocal warm_stt
                     async for kind, txt in stt2.events():
                         if kind == "final" and txt:
-                            if warm_stt is None:
-                                # From end-of-audio, not start. This is what the
-                                # caller waits through after they stop speaking.
-                                warm_stt = (time.monotonic() - fed_at) * 1000
+                            if not first_at2:
+                                first_at2.append(time.monotonic())
                             heard2.append(txt)
                             break
 
@@ -340,6 +348,8 @@ def test_ai(
                     task2.cancel()
                 await stt2.close()
 
+                if first_at2:
+                    warm_stt = max((first_at2[0] - fed_at) * 1000, 0.0)
                 if warm_stt is not None:
                     results["stt_latency"] = max(warm_stt, 0.0)
                     audio_secs = results.get("_audio_secs", 0) or 0
