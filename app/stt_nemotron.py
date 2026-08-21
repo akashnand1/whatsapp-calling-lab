@@ -131,6 +131,12 @@ class NemotronStreamingSTT(STTProvider):
         self._speaking = False
         self._utterance = 0
         self._task: asyncio.Task | None = None
+        # Endpointing: how much sustained silence ends an utterance. Read from
+        # the same setting the Whisper path uses so the two engines segment
+        # speech identically -- a driver should not get different turn-taking
+        # behaviour just because their language routes to a different recogniser.
+        self._silent = 0
+        self._silence_frames = max(1, int(get_settings().stt_silence_ms) // 20)
 
         # Streaming state, threaded through conformer_stream_step.
         self._cache = None
@@ -294,13 +300,30 @@ class NemotronStreamingSTT(STTProvider):
                 self._reset_stream()
                 await self._out.put(("speech_started", ""))
             self._buf.extend(pcm16)
+            self._silent = 0
             # Feed the recogniser WHILE they talk. This is the whole point: by
             # end-of-speech nearly all the compute is already spent.
             await self._maybe_step()
         elif self._speaking:
-            self._speaking = False
-            self._utterance += 1
-            await self._flush(self._utterance)
+            # DO NOT end the utterance on the first quiet frame. Speech dips
+            # below the threshold constantly -- between words, on unvoiced
+            # consonants, mid-breath. An earlier version flushed immediately,
+            # which chopped one sentence into several "utterances", each one
+            # resetting the encoder cache and decoding a fragment: six words in,
+            # "सट बॉर्डर।" out.
+            #
+            # Wait for a sustained silence, and keep buffering through it -- the
+            # trailing audio is context the decoder needs. Same threshold as the
+            # Whisper path, which is where this logic was already correct.
+            self._buf.extend(pcm16)
+            self._silent += 1
+            if self._silent >= self._silence_frames:
+                self._speaking = False
+                self._silent = 0
+                self._utterance += 1
+                await self._flush(self._utterance)
+            else:
+                await self._maybe_step()
 
     async def _maybe_step(self) -> None:
         """Hand accumulated audio to the buffer, then drain whatever it yields.

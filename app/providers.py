@@ -297,7 +297,9 @@ class WhisperLocalSTT(STTProvider):
         # they are driving. The cost of waiting longer is a little latency; the
         # cost of cutting them off is a fragment that transcribes as nonsense and
         # an agent that answers half a question.
-        silence_ms: int = 1100,
+        # None -> take STT_SILENCE_MS from config, so this and the Nemotron path
+        # cannot drift apart. An explicit value still overrides, for tests.
+        silence_ms: int | None = None,
         threshold: int = 700,
     ) -> None:
         self._model_size = model_size or _s().whisper_model
@@ -324,6 +326,8 @@ class WhisperLocalSTT(STTProvider):
 
         from .config import STT_HINT
         self._hint = STT_HINT
+        if silence_ms is None:
+            silence_ms = get_settings().stt_silence_ms
         self._silence_frames = silence_ms // 20  # inbound frames are 20 ms
         self._threshold = threshold
 

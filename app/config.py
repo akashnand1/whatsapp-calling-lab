@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # app/languages.py, because no single model covers all seven. Force
     # "whisper" or "nemotron" to A/B one language against the other engine.
     stt_engine: str = "auto"
+    # How much sustained silence ends a caller's turn. Shared by BOTH local
+    # engines so a driver gets the same turn-taking whichever recogniser their
+    # language routes to. 700ms cut people who paused to think; 1100 does not.
+    # Raising it makes the agent slower to answer but less likely to interrupt.
+    stt_silence_ms: int = 1100
     nemotron_model: str = "nvidia/nemotron-3.5-asr-streaming-0.6b"
     # Streaming chunk in seconds. NVIDIA's published WER figures use 1.12s, and
     # this is the latency/accuracy dial: smaller chunks return partials sooner
