@@ -107,6 +107,11 @@ class Pipeline:
         # Rotating holding lines -- see _next_stall().
         self._stall_pool: list[str] = []
         self._last_stall: str = ""
+        # Set once the hang-up has been triggered. Deepgram delivered one last
+        # garbled fragment AFTER the call was terminated, which started a turn
+        # against a dead session and logged a "turn produced NO speech" error
+        # over the top of a perfectly good call.
+        self._finished = False
 
         self._speaking = False
         self._speak_task: asyncio.Task | None = None
@@ -147,6 +152,11 @@ class Pipeline:
 
     async def handle_turn(self, user_text: str) -> None:
         """The human finished a turn. Think, then speak."""
+        if self._finished:
+            # The call is already being torn down. Anything arriving now is a
+            # trailing fragment from the recogniser, not a turn.
+            log.info("ignoring %r — the call is already ending", user_text[:60])
+            return
         # He is still talking, so any pending hang-up is off.
         self._cancel_linger()
         self.transcript.append(("user", user_text))
@@ -293,6 +303,7 @@ class Pipeline:
             "nothing further %.0fs after the closing line — hanging up",
             LINGER_AFTER_GOODBYE_S,
         )
+        self._finished = True
         try:
             self._on_finish()          # type: ignore[misc]
         except Exception:

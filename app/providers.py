@@ -92,6 +92,22 @@ def _spoken_turn_tokens() -> int:
     return s.turn_tokens if s else 800
 
 
+# Question marks in every script we speak. Devanagari and Cyrillic use the Latin
+# one; Arabic and Urdu use U+061F.
+_QUESTION_MARKS = "?？؟"
+
+
+def _hands_over_the_floor(text: str) -> bool:
+    """Has the agent actually asked the driver something?
+
+    This is the difference between a turn that can safely end and one that leaves
+    a human holding a silent line. It is not a nicety: a turn that ended on
+    "theek hai, samajh gaya" and nothing else left a real driver waiting
+    THIRTY-NINE SECONDS before he gave up and asked "do you need anything else?"
+    """
+    return any(q in text for q in _QUESTION_MARKS)
+
+
 def _processing_line() -> str:
     """What to say when the failure is OURS and we still have the answer.
 
@@ -944,6 +960,8 @@ class AnthropicLLM(LLMProvider):
         # in round 3. From the driver's side that is two or three thoughts
         # fighting over the line. A human says one thing and then waits.
         spoke_this_turn = False
+        spoke_rounds = 0
+        turn_said: list[str] = []
         for _round in range(6):                  # bound the tool loop
             buf, said = "", []
             tool_calls: list[dict] = []
@@ -1025,6 +1043,8 @@ class AnthropicLLM(LLMProvider):
                 yield buf.strip()
             if said:
                 spoke_this_turn = True
+                spoke_rounds += 1
+                turn_said.extend(said)
 
             # Rebuild the assistant turn as plain dicts rather than replaying the
             # SDK's response objects. Those do not round-trip: a `thinking` block
@@ -1125,18 +1145,33 @@ class AnthropicLLM(LLMProvider):
                          ", ".join(ended))
                 return
 
-            # ONE SPOKEN UTTERANCE PER TURN.
+            # ONE QUESTION PER TURN -- not one ROUND per turn.
             #
-            # If this round has already said something out loud, the tools have
-            # now run and their results are in history for the NEXT turn. Going
-            # round again only lets the model add a second thought to a question
-            # the driver has not answered yet -- which is exactly what happened:
-            # it asked about the documents and then, without pausing, read the
-            # entire nine-milestone summary in the same breath.
+            # The first version of this ended the turn as soon as anything had
+            # been said, which broke the opening exchange badly: round 1 said
+            # "theek hai, samajh gaya", called set_current_stage and get_missing,
+            # and the turn ended there. No question was ever asked, and the driver
+            # sat in silence for THIRTY-NINE SECONDS before asking us whether we
+            # needed anything else.
+            #
+            # So the test is not "did we speak" but "did we hand the floor back".
+            # An acknowledgement is not a hand-off: keep looping so the model can
+            # use the tool result it just asked for and actually ask something. A
+            # question IS a hand-off: stop, because going round again is what
+            # previously produced two and three questions stacked on top of each
+            # other before the driver could answer any of them.
             if said:
-                log.info("spoke %d clause(s) this round — tools have run, ending "
-                         "the turn instead of talking over the driver", len(said))
-                return
+                if _hands_over_the_floor(" ".join(turn_said)):
+                    log.info("asked the driver a question — ending the turn "
+                             "rather than stacking another on top of it")
+                    return
+                if spoke_rounds >= 2:
+                    log.info("two spoken rounds and still no question — ending "
+                             "the turn before this becomes a monologue")
+                    return
+                log.info("only acknowledged so far (%r) — looping so the driver "
+                         "is actually asked something",
+                         " ".join(turn_said)[:60])
 
     def _run_tool(self, name: str, args: dict) -> str:
         handler = self._handlers.get(name)

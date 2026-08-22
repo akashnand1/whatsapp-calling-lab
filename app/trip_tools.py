@@ -231,6 +231,17 @@ def make_handlers(state: TripState) -> dict:
 
         m = BY_CODE[code]
         parts = [f"Recorded {code} at '{when}'."]
+        if not iso:
+            # Say this loudly. On a real call at_destination_border went in with
+            # iso=None while the agent cheerfully read "subah nau baje" back to
+            # the driver -- so the spoken summary was right and the payload the
+            # TMS would receive had no timestamp at all. The tool result is the
+            # nearest thing to the model's attention, so it belongs here.
+            parts.append(
+                f"WARNING: time_iso is MISSING for {code}, so this milestone "
+                "currently has no machine-readable time. Work it out from what "
+                "he said and send this milestone again with time_iso filled in."
+            )
         if m.needs_document and not doc:
             parts.append(f"Document still needed: {m.document_hi}.")
         return " ".join(parts)
