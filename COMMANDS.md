@@ -1,5 +1,14 @@
 # Terminal commands — copy/paste in order
 
+> **If anything returns `code=190`, check the token first:**
+> ```bash
+> python cli.py token
+> ```
+> It prints the type, the exact expiry and how long is left. A temporary token's
+> expiry is a fixed clock time stamped when Meta issued it — **not** 24 hours from
+> when you clicked Generate — so one made a few hours ago can already be dead.
+> `STEP-BY-STEP.md` step 6 makes a System User token that never expires.
+
 Target: ring **+971554225948** from **+971526328601** with **7-day temporary**
 permission.
 

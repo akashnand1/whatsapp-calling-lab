@@ -144,9 +144,13 @@ async def main(to: str) -> None:
                     "         Business Settings → Business Info → Start Verification")
             ok(f"messaging limit = {tier}")
         except GraphError as e:
-            die(f"could not read messaging limit: {e}",
-                "Token is probably expired (the API Setup token lasts 24h) or\n"
-                "         lacks whatsapp_business_management.")
+            hint = ("Token expired, or it lacks whatsapp_business_management.\n"
+                    "         Run: python cli.py token\n"
+                    "         A temporary token's expiry is a FIXED clock time set\n"
+                    "         when it was issued — not 24h from when you made it, so\n"
+                    "         a token generated hours ago can already be dead.\n"
+                    "         STEP-BY-STEP.md step 6 makes one that never expires.")
+            die(f"could not read messaging limit: {e}", hint)
 
         # ------------------------------------------------------------ 4
         head(4, "Calling enabled on the number?")

@@ -65,6 +65,21 @@ class GraphClient:
             raise GraphError(r.status_code, payload)
         return payload
 
+    # -- the token itself ---------------------------------------------------
+
+    async def debug_token(self) -> dict[str, Any]:
+        """Ask Meta what this token actually is and when it dies.
+
+        Worth having as its own command because the expiry is NOT 24 hours from
+        when you clicked Generate -- Meta stamps a fixed wall-clock expiry, on the
+        hour. A token can therefore be four hours old and already dead, which
+        looks like a bug in this lab rather than a fact about the token.
+        """
+        return await self._request(
+            "GET", "/debug_token",
+            params={"input_token": self._s.wa_access_token},
+        )
+
     # -- settings -----------------------------------------------------------
 
     async def get_settings_for_number(self) -> dict[str, Any]:

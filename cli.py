@@ -556,6 +556,81 @@ def turn_test(timeout: float = 6.0) -> None:
 
 
 @app.command()
+def token() -> None:
+    """What kind of token is in .env, and exactly when does it expire?
+
+    Run this BEFORE a call rather than discovering the answer from a 401 in the
+    middle of a test. Meta does not give a temporary token 24 hours from the
+    moment you generate it -- it stamps a fixed expiry, on the hour. So a token
+    generated four hours ago can already be dead, which reads as a broken lab.
+    """
+    import time
+    from datetime import datetime, timezone
+
+    from app.graph import GraphClient, GraphError
+
+    async def go():
+        g = GraphClient()
+        try:
+            return await g.debug_token()
+        finally:
+            await g.close()
+
+    try:
+        data = (_run(go()) or {}).get("data", {})
+    except GraphError as e:
+        typer.secho(f"\n  Meta would not inspect the token: {e}\n", fg=typer.colors.RED)
+        if e.code == 190:
+            typer.secho(
+                "  code=190 here means the token is ALREADY invalid — the message\n"
+                "  above states the exact moment it expired. Generate a new one.\n",
+                fg=typer.colors.YELLOW,
+            )
+        typer.secho(
+            "  For a token that never expires, see STEP-BY-STEP.md step 6\n"
+            "  (Business Settings -> Users -> System Users -> Expiration: Never).\n",
+            fg=typer.colors.BRIGHT_BLACK,
+        )
+        raise typer.Exit(1)
+
+    exp = int(data.get("expires_at") or 0)
+    valid = bool(data.get("is_valid"))
+    typer.echo("")
+    typer.secho(f"  type         {data.get('type', '?')}", fg=None)
+    typer.secho(f"  app          {data.get('application', '?')} ({data.get('app_id', '?')})")
+    typer.secho(f"  valid        {valid}", fg=typer.colors.GREEN if valid else typer.colors.RED)
+    if exp == 0:
+        typer.secho("  expires      NEVER — this is a System User token", fg=typer.colors.GREEN)
+    else:
+        when = datetime.fromtimestamp(exp, tz=timezone.utc).astimezone()
+        left = exp - datetime.now(tz=timezone.utc).timestamp()
+        hrs = left / 3600
+        colour = (typer.colors.GREEN if hrs > 4
+                  else typer.colors.YELLOW if hrs > 0.5 else typer.colors.RED)
+        typer.secho(f"  expires      {when:%Y-%m-%d %H:%M %Z}", fg=colour)
+        typer.secho(
+            f"  time left    {hrs:.1f} hours" if left > 0
+            else f"  time left    EXPIRED {abs(hrs):.1f} hours ago",
+            fg=colour,
+        )
+    scopes = data.get("scopes") or []
+    typer.secho(f"  scopes       {', '.join(scopes) if scopes else '(none reported)'}")
+    need = {"whatsapp_business_messaging", "whatsapp_business_management"}
+    missing = need - set(scopes)
+    if scopes and missing:
+        typer.secho(f"  MISSING      {', '.join(sorted(missing))}", fg=typer.colors.RED)
+    if exp and exp - time.time() < 24 * 3600:
+        typer.secho(
+            "\n  Note: a temporary token's expiry is a fixed clock time stamped when\n"
+            "  it was issued -- NOT 24 hours from now. \"I generated it a few hours\n"
+            "  ago\" therefore says nothing about whether it is still alive.\n"
+            "  STEP-BY-STEP.md step 6 makes one that never expires.",
+            fg=typer.colors.BRIGHT_BLACK,
+        )
+    typer.echo("")
+
+
+@app.command()
 def preflight() -> None:
     """Check everything that must be true before calling can work."""
     try:
