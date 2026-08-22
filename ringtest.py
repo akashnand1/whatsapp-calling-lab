@@ -56,6 +56,11 @@ def die(m: str, fix: str = "") -> None:
     sys.exit(1)
 
 
+# Watch window in seconds, overridable with --seconds. This only controls how
+# long the script REPORTS state; it no longer bounds the call itself.
+WATCH_SECONDS = 45
+
+
 async def main(to: str) -> None:
     print(f"\n{C_BOLD}WhatsApp Calling — ring test{C_END}")
     print(f"{C_DIM}target: {to}{C_END}")
@@ -236,7 +241,11 @@ async def main(to: str) -> None:
         print(f"  `calls` field is not subscribed.{C_END}\n")
 
         seen: set[str] = set()
-        deadline = time.time() + 45
+        # How long to WATCH. This is not how long the call may last -- see the
+        # terminate logic at the end, which no longer kills a healthy call.
+        deadline = time.time() + WATCH_SECONDS
+        print(f"  {C_DIM}watching for {WATCH_SECONDS}s "
+              f"(--seconds N to change){C_END}")
         while time.time() < deadline:
             try:
                 calls = httpx.get(f"{SERVER}/calls", timeout=10).json().get("active", [])
@@ -291,20 +300,54 @@ async def main(to: str) -> None:
             print(f"  App Dashboard → WhatsApp → Configuration, and that `calls`")
             print(f"  is subscribed. Then: python cli.py events")
 
-        print(f"\n  {C_DIM}Terminating…{C_END}")
+        # NEVER hang up a call that is working.
+        #
+        # This used to terminate unconditionally after a 45s watch window, which
+        # was fine when the only question was "does it ring and connect". Once
+        # the agent existed it meant every conversation was killed mid-sentence
+        # at ~40s -- and it looked exactly like the bot dropping the call, which
+        # sent us hunting for a fault that was in this script.
+        still_live = False
         try:
-            await g.terminate_call(call_id)
-        except GraphError:
+            active = httpx.get(f"{SERVER}/calls", timeout=10).json().get("active", [])
+            still_live = any(c["call_id"] == call_id for c in active)
+        except Exception:
             pass
+
+        if still_live and answered:
+            print(f"\n  {C_OK}Call is still live — leaving it alone.{C_END}")
+            print(f"  {C_DIM}Keep talking; hang up from the handset when you are done.")
+            print(f"  The server log will print the transcript and cost on hangup.{C_END}")
+        elif still_live:
+            # Never answered but still ringing/stuck: clean it up, that is litter.
+            print(f"\n  {C_DIM}Terminating an unanswered call…{C_END}")
+            try:
+                await g.terminate_call(call_id)
+            except GraphError:
+                pass
         print()
     finally:
         await g.close()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or not sys.argv[1].isdigit():
+    args = [a for a in sys.argv[1:]]
+    if "--seconds" in args:
+        i = args.index("--seconds")
+        try:
+            globals()["WATCH_SECONDS"] = int(args[i + 1])
+        except (IndexError, ValueError):
+            print("--seconds needs a number, e.g. --seconds 300")
+            sys.exit(2)
+        del args[i:i + 2]
+
+    if len(args) != 1 or not args[0].isdigit():
         print(__doc__)
         print("Give your personal WhatsApp number in E.164 WITHOUT '+':")
         print("  python ringtest.py 971501234567")
+        print("\nFor a full conversation, watch for longer:")
+        print("  python ringtest.py 971501234567 --seconds 300")
+        print("\nThe call is NOT hung up when the window ends — if it is still")
+        print("connected the script just stops watching and leaves you talking.")
         sys.exit(2)
-    asyncio.run(main(sys.argv[1]))
+    asyncio.run(main(args[0]))

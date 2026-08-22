@@ -878,6 +878,24 @@ class AnthropicLLM(LLMProvider):
                 _round + 1, getattr(final, "stop_reason", "?"), len(said),
                 [tc.name for tc in tool_calls],
             )
+
+            # SAY SOMETHING before running the tools.
+            #
+            # On a real call this round returned three tool calls and no text at
+            # all, spent 8 seconds doing it, and only spoke on the SECOND round.
+            # From the driver's side that is ten seconds of silence right after
+            # he finished a long answer, and he hung up. Tool work is invisible;
+            # silence on a phone call is indistinguishable from a dropped line.
+            #
+            # Only on the first round, and only when nothing was said -- repeating
+            # "one moment" before every tool call would be worse than saying it
+            # once.
+            if _round == 0 and not said:
+                from .languages import spec as _lspec
+                _sp = _lspec(_s().agent_language)
+                filler = _sp.filler if _sp else "One moment."
+                log.info("speaking filler while tools run: %r", filler)
+                yield filler
             results = []
             for tc in tool_calls:
                 out = self._run_tool(tc.name, tc.input or {})

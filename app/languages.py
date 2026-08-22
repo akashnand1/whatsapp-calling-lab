@@ -71,6 +71,15 @@ class LanguageSpec:
     # monolingual is also cheaper ($0.0048 vs $0.0058/min).
     deepgram_lang: str = ""  # empty -> same as decode_lang
 
+    # Spoken immediately when the model starts calling tools without saying
+    # anything. On a real call it returned three tool calls and ZERO text, took
+    # 8 seconds doing it, then needed a SECOND round to speak. The driver heard
+    # ten seconds of silence after finishing his sentence and hung up.
+    #
+    # This is not cosmetic. It is the difference between "the agent is thinking"
+    # and "the line has dropped", and only one of those keeps people on the call.
+    filler: str = "One moment."
+
     @property
     def decode_lang(self) -> str:
         return self.stt_lang or self.code
@@ -101,6 +110,12 @@ HOW TO SPEAK ON A CALL
 - If they ask for a human, say you are transferring them and stop talking.
 
 YOUR TASK: collect the time of every trip milestone, plus the documents.
+
+SPEAK FIRST, THEN USE TOOLS. Always begin a reply with a few words the driver
+can hear -- an acknowledgement, or the next question -- and put your tool calls
+in the SAME reply, after that text. A reply that is only tool calls leaves the
+driver listening to silence for several seconds, which sounds exactly like the
+call has dropped. It has already made one driver hang up.
 
 HOW TO WORK
 1. First ask where they are right now, then call set_current_stage.
@@ -169,6 +184,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="English",
         piper_dir="en/en_US/amy/medium",
         piper_voice="en_US-amy-medium",
+        filler="Right, one moment.",
         piper_rate=22050,
         # Latin script is roughly one token per word, so a turn needs far fewer
         # tokens than the same speech in Devanagari or Cyrillic.
@@ -190,6 +206,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="हिन्दी",
         piper_dir="hi/hi_IN/pratham/medium",
         piper_voice="hi_IN-pratham-medium",
+        filler="ठीक है, एक सेकंड।",
         piper_rate=22050,
         # Devanagari costs roughly 3-4x the tokens of Latin script, and the
         # nine-milestone read-back is long. At 420 the model ran out of budget
@@ -220,6 +237,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="Türkçe",
         piper_dir="tr/tr_TR/dfki/medium",
         piper_voice="tr_TR-dfki-medium",
+        filler="Tamam, bir saniye.",
         piper_rate=22050,
         turn_tokens=1100,
         greeting_out=(
@@ -242,6 +260,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="русский",
         piper_dir="ru/ru_RU/dmitri/medium",
         piper_voice="ru_RU-dmitri-medium",
+        filler="Хорошо, одну секунду.",
         piper_rate=22050,
         # Cyrillic tokenises worse than Latin, though better than Devanagari.
         turn_tokens=1200,
@@ -266,6 +285,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="العربية",
         piper_dir="ar/ar_JO/kareem/medium",
         piper_voice="ar_JO-kareem-medium",
+        filler="حسنًا، لحظة واحدة.",
         piper_rate=22050,
         turn_tokens=1400,
         greeting_out=(
@@ -289,6 +309,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="اردو",
         piper_dir="ur/ur_PK/fasih/medium",
         piper_voice="ur_PK-fasih-medium",
+        filler="ٹھیک ہے، ایک سیکنڈ۔",
         piper_rate=22050,
         turn_tokens=1400,
         greeting_out=(
@@ -321,6 +342,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         endonym="қазақша",
         piper_dir="kk/kk_KZ/issai/high",
         piper_voice="kk_KZ-issai-high",
+        filler="Жақсы, бір секунд.",
         piper_rate=22050,
         turn_tokens=1300,
         greeting_out=(
