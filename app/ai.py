@@ -106,9 +106,29 @@ class Pipeline:
         self.transcript.append(("user", user_text))
         log.info("user: %s", user_text)
         self._turn_started = time.monotonic()
+        spoke = len(self.transcript)
         try:
             await self._launch(self.llm.respond(user_text))
+            # A turn that completes without SAYING anything is the worst
+            # outcome: the driver hears dead air and concludes the line dropped.
+            # It happened on a real call -- one Anthropic request returned 200,
+            # then nothing at all, no text, no tool call, no error. Silence is
+            # never an acceptable answer, so say something.
+            if len(self.transcript) == spoke:
+                log.error(
+                    "turn produced NO speech (no text, no tool call, no error) "
+                    "— speaking the fallback so the caller is not left in silence"
+                )
+                await self._launch(_once(FALLBACK_LINE))
         except asyncio.CancelledError:
+            # Log BEFORE re-raising. This path left no trace at all, so a
+            # cancelled turn was indistinguishable from a turn that never
+            # started -- which is exactly what made the dead-air call
+            # impossible to diagnose.
+            log.warning(
+                "turn CANCELLED after %.1fs — superseded by a new turn, or the "
+                "call ended", time.monotonic() - self._turn_started,
+            )
             raise
         except Exception:
             # A failed LLM call must never leave the caller in silence. Before,

@@ -295,6 +295,37 @@ async def place_call(req: CallRequest) -> dict[str, object]:
 app.include_router(control)
 
 
+@app.on_event("startup")
+async def _prewarm() -> None:
+    """Load the TTS voice before the first call, not during it.
+
+    Piper takes ~1.2s to load its ONNX model, and it was doing that AFTER the
+    caller answered -- so the very first driver heard silence for over a second
+    before the greeting started. The cache is per-process, so only call #1 ever
+    paid it, but call #1 is the one you demo.
+    """
+    s = get_settings()
+    if s.media_only:
+        return
+    try:
+        from .providers import make_tts
+        t0 = __import__("time").monotonic()
+        tts = make_tts()
+        n = 0
+        async for chunk in tts.stream("ठीक है।" if s.agent_language.startswith("hi") else "Ready."):
+            n += len(chunk)
+        await tts.close()
+        log.info(
+            "pre-warmed TTS in %.0f ms (%d bytes) — the first caller no longer "
+            "waits for the model to load",
+            (__import__("time").monotonic() - t0) * 1000, n,
+        )
+    except Exception:
+        # Never block startup over this; it is an optimisation, not a dependency.
+        log.warning("TTS pre-warm failed; first call will pay the load cost",
+                    exc_info=True)
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     for s in registry.all():

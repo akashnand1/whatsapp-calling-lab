@@ -782,10 +782,20 @@ class AnthropicLLM(LLMProvider):
         a call; recording each fact as it is confirmed gives a payload the TMS can
         consume, and lets the agent know precisely what is still missing.
         """
-        for _ in range(6):                       # bound the tool loop
+        for _round in range(6):                  # bound the tool loop
             buf, said = "", []
             tool_calls: list[dict] = []
 
+            # Log every request. On a real call one request returned 200 and then
+            # produced nothing -- no text, no tool call, no error -- and there was
+            # no way to tell whether the model had answered, called a tool, or
+            # the stream had simply stalled. A line per round makes the shape of
+            # a turn visible.
+            log.info(
+                "llm round %d: model=%s tools=%d history=%d caching=%s",
+                _round + 1, self._model, len(self._tools or []),
+                len(self.history), _s().prompt_caching,
+            )
             async with self._client.messages.stream(
                 model=self._model,
                 max_tokens=_spoken_turn_tokens(),
@@ -863,6 +873,11 @@ class AnthropicLLM(LLMProvider):
                     )
                 return
 
+            log.info(
+                "llm round %d: stop_reason=%s spoke=%d clause(s) tools=%s",
+                _round + 1, getattr(final, "stop_reason", "?"), len(said),
+                [tc.name for tc in tool_calls],
+            )
             results = []
             for tc in tool_calls:
                 out = self._run_tool(tc.name, tc.input or {})

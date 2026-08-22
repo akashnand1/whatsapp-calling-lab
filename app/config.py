@@ -289,9 +289,16 @@ _GREETING_EN_IN = "TruKKer dispatch, this is the automated assistant. How can I 
 # Fully Devanagari, including the brand name. Piper's Hindi voice reads Latin
 # script letter-by-letter, so "TruKKer" would come out as "टी आर यू के के ई आर".
 # ट्रकर is the phonetic form ("trucker"), which is how it should sound anyway.
+# SHORT, and it asks the right question.
+#
+# The old greeting was ~8 seconds of speech and asked to "confirm your pickup
+# time" -- which is not this agent's job at all. It collects nine trip
+# milestones. So the caller heard a long preamble, then a question that did not
+# match what came next. Every word here is dead air before the driver can start,
+# and it was the largest single contributor to "5 seconds before I heard
+# anything".
 _GREETING_HI_OUT = (
-    "नमस्ते, मैं ट्रकर डिस्पैच से बोल रहा हूँ, आपके लोड के बारे में। "
-    "क्या मैं अभी आपका पिकअप समय कन्फ़र्म कर सकता हूँ?"
+    "नमस्ते, ट्रकर डिस्पैच से बोल रहा हूँ। अभी आप ट्रिप में कहाँ पर हैं?"
 )
 _GREETING_HI_IN = "ट्रकर डिस्पैच, मैं ऑटोमेटेड असिस्टेंट बोल रहा हूँ। मैं आपकी क्या मदद कर सकता हूँ?"
 
