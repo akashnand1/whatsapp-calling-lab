@@ -428,6 +428,12 @@ class CallSession:
     # -- teardown -----------------------------------------------------------
 
     async def hangup(self) -> None:
+        # Idempotent. Two things race to end a call: our own terminate, and the
+        # `terminated` webhook that our terminate provokes. Both called this, so
+        # the log reported the same session closing twice.
+        if getattr(self, "_torn_down", False):
+            return
+        self._torn_down = True
         self.ended_at = time.monotonic()
         for t in self._tasks:
             if not t.done():

@@ -89,6 +89,13 @@ class LanguageSpec:
     # asking me the same thing." Say what is actually happening instead.
     processing: str = "Got that — just noting it down, one moment."
 
+    # Spoken ~1 second into a turn if the model has not produced a word yet,
+    # WHILE it keeps working. The model spends its opening seconds writing tool
+    # calls, which make no sound: on a real call the driver finished his sentence
+    # and heard nothing for 19.5 seconds. The old filler only fired after the
+    # round had already finished, which is far too late to reassure anyone.
+    checking: str = "Let me just check those details."
+
     # Spoken ONLY when the audio really was unusable and we genuinely need it
     # again. Kept separate from `processing` so that our failures cannot masquerade
     # as the driver's.
@@ -137,7 +144,11 @@ HOW TO WORK
 3. Ask them in GROUPS of two or three in a single question -- never one at a
    time. The first time you ask, give a short example answer so they know to
    attach each time to the event it belongs to, not just list times.
-4. Call record_milestone immediately for each answer you get.
+4. Say your next question FIRST, then record what he just told you with a
+   single record_milestones call carrying one entry per milestone. Never emit
+   one call per milestone: writing five copies of that argument block cost a
+   real driver seventeen seconds of silence. Working out the timestamps and
+   asking the next question happen in the same reply -- question first.
 5. Fold the document question into the SAME turn as the time question, never
    as a separate turn.
 6. At the end -- this matters most -- read the whole list back in order and ask
@@ -206,6 +217,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="en/en_US/amy/medium",
         piper_voice="en_US-amy-medium",
         filler="Right, one moment.",
+        checking="Let me just check those details.",
         processing="Got that — just noting it down, one moment.",
         garbled="Sorry, the line broke up there. Could you say that again?",
         piper_rate=22050,
@@ -230,6 +242,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="hi/hi_IN/pratham/medium",
         piper_voice="hi_IN-pratham-medium",
         filler="ठीक है, एक सेकंड।",
+        checking="एक मिनट, मैं ये डिटेल देख रहा हूँ।",
         processing="जी, लिख रहा हूँ — एक सेकंड।",
         garbled="माफ़ कीजिए, आवाज़ कट गई थी। ज़रा फिर से बताइए।",
         piper_rate=22050,
@@ -263,6 +276,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="tr/tr_TR/dfki/medium",
         piper_voice="tr_TR-dfki-medium",
         filler="Tamam, bir saniye.",
+        checking="Bir dakika, bu bilgilere bakıyorum.",
         processing="Aldım, not ediyorum — bir saniye.",
         garbled="Kusura bakmayın, ses kesildi. Tekrar söyler misiniz?",
         piper_rate=22050,
@@ -288,6 +302,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ru/ru_RU/dmitri/medium",
         piper_voice="ru_RU-dmitri-medium",
         filler="Хорошо, одну секунду.",
+        checking="Минуту, я сверяю эти данные.",
         processing="Записываю — одну секунду.",
         garbled="Извините, связь прервалась. Повторите, пожалуйста.",
         piper_rate=22050,
@@ -315,6 +330,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ar/ar_JO/kareem/medium",
         piper_voice="ar_JO-kareem-medium",
         filler="حسنًا، لحظة واحدة.",
+        checking="لحظة، أراجع هذه التفاصيل.",
         processing="تمام، أسجّل التفاصيل — لحظة واحدة.",
         garbled="عذرًا، تقطّع الصوت. أعد ما قلته من فضلك.",
         piper_rate=22050,
@@ -341,6 +357,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ur/ur_PK/fasih/medium",
         piper_voice="ur_PK-fasih-medium",
         filler="ٹھیک ہے، ایک سیکنڈ۔",
+        checking="ایک منٹ، میں یہ تفصیل دیکھ رہا ہوں۔",
         processing="جی، لکھ رہا ہوں — ایک سیکنڈ۔",
         garbled="معاف کیجیے، آواز کٹ گئی تھی۔ ذرا دوبارہ بتائیے۔",
         piper_rate=22050,
@@ -376,6 +393,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="kk/kk_KZ/issai/high",
         piper_voice="kk_KZ-issai-high",
         filler="Жақсы, бір секунд.",
+        checking="Бір минут, мәліметтерді тексеріп жатырмын.",
         processing="Жазып отырмын — бір секунд.",
         garbled="Кешіріңіз, дауыс үзіліп кетті. Қайталап айтыңызшы.",
         piper_rate=22050,
@@ -427,7 +445,7 @@ def today_fragment_en() -> str:
         f"\nToday's date and time: {now:%Y-%m-%d %H:%M} ({now:%A}).\n"
         f"'Yesterday' means {y:%Y-%m-%d}; 'the day before yesterday' means "
         f"{dby:%Y-%m-%d}.\n"
-        "Record every time in record_milestone's time_iso as "
+        "Record every time in record_milestones' time_iso as "
         "'YYYY-MM-DD HH:MM' on a 24-hour clock.\n"
         "Remember: midnight is 00:00 of the FOLLOWING day. "
         "Five in the evening is 17:00; five in the morning is 05:00.\n"

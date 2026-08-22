@@ -28,6 +28,18 @@ from .providers import make_llm, make_stt, make_tts
 log = logging.getLogger("ai")
 
 
+# How long to wait for the model's first word before saying something to fill
+# the gap, and how long between holding lines after that. 900 ms is roughly the
+# point at which a pause on a phone call stops reading as thinking and starts
+# reading as a fault.
+STALL_FIRST_MS = 900
+STALL_REPEAT_MS = 4500
+
+# Three DIFFERENT sentences, in order. Repeating one line sounds like a stuck
+# recording; three distinct ones sound like someone working through something.
+STALL_LINES = ("checking", "processing", "filler")
+
+
 # How long to keep the line open after the agent's closing line, in case the
 # driver adds one last thing. Long enough for a "shukriya, theek hai", short
 # enough that nobody is left holding a dead line -- or paying for it.
@@ -141,7 +153,9 @@ class Pipeline:
         self._turn_started = time.monotonic()
         spoke = len(self.transcript)
         try:
-            await self._launch(self.llm.respond(user_text))
+            await self._launch(
+                self._with_stall_filler(self.llm.respond(user_text))
+            )
             # A turn that completes without SAYING anything is the worst
             # outcome: the driver hears dead air and concludes the line dropped.
             # It happened on a real call -- one Anthropic request returned 200,
@@ -177,6 +191,52 @@ class Pipeline:
             # Did the model call end_call during this turn? If so, wait for the
             # goodbye to finish playing, give him a moment to reply, then hang up.
             self._arm_linger_if_finished()
+
+    # -- filling the gap while the model works ------------------------------
+
+    async def _with_stall_filler(self, chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+        """Speak a holding line if the model has not produced a word yet.
+
+        The model spends the opening seconds of a turn writing tool calls, and
+        tool calls make no sound. On a real call the driver finished a long answer
+        and heard nothing for 19.5 seconds, because the only filler fired AFTER
+        the round completed -- by which time the silence had already happened.
+
+        This races the model against a clock and speaks into the gap while it
+        keeps working, so the holding line and the tool calls genuinely overlap.
+        The turn then continues normally: nothing is discarded or restarted.
+        """
+        it = chunks.__aiter__()
+        pending: asyncio.Task | None = None
+        fillers = 0
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.ensure_future(it.__anext__())
+                wait_s = (STALL_FIRST_MS if fillers == 0 else STALL_REPEAT_MS) / 1000
+                done, _ = await asyncio.wait({pending}, timeout=wait_s)
+                if not done:
+                    if fillers < len(STALL_LINES):
+                        line = _line(STALL_LINES[fillers])
+                        log.info("no word from the model after %.1fs — saying %r",
+                                 wait_s, line)
+                        fillers += 1
+                        yield line
+                    else:
+                        # Out of holding lines. Keep waiting rather than talking
+                        # over ourselves; handle_turn covers a genuine hang.
+                        await pending
+                    continue
+                try:
+                    chunk = pending.result()
+                except StopAsyncIteration:
+                    return
+                finally:
+                    pending = None
+                yield chunk
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
 
     # -- ending the call ----------------------------------------------------
 

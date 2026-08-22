@@ -47,17 +47,26 @@ TOOLS: list[dict] = [
         },
     },
     {
-        "name": "record_milestone",
+        "name": "record_milestones",
         "description": (
-            "Record the time the driver gave for one milestone. Call this "
-            "immediately each time he confirms a time -- do not batch them up "
-            "until the end of the call."
+            "Record the times the driver gave. Put EVERY milestone he just "
+            "mentioned into a single call with several entries -- one drop of "
+            "five milestones is one call, not five. Emitting five separate tool "
+            "calls means writing five copies of this whole argument block, which "
+            "on a real call took seventeen seconds of the driver's silence to "
+            "generate. Say your next question first, then record."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "milestone": {"type": "string", "enum": _CODES},
-                "time_reported": {
+              "entries": {
+                "type": "array",
+                "description": "One object per milestone the driver just gave.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "milestone": {"type": "string", "enum": _CODES},
+                    "time_reported": {
                     "type": "string",
                     "description": (
                         "The time exactly as the driver expressed it, e.g. "
@@ -83,15 +92,19 @@ TOOLS: list[dict] = [
                         "rather than inventing one."
                     ),
                 },
-                "document_status": {
-                    "type": "string",
-                    "description": (
+                    "document_status": {
+                      "type": "string",
+                      "description": (
                         "Optional. What he said about the document for this "
                         "milestone, e.g. 'bhej diya', 'abhi nahi bheja'."
-                    ),
+                      ),
+                    },
+                  },
+                  "required": ["milestone", "time_reported"],
                 },
+              },
             },
-            "required": ["milestone", "time_reported"],
+            "required": ["entries"],
         },
     },
     {
@@ -172,7 +185,29 @@ def make_handlers(state: TripState) -> dict:
             f"is a single confirmation at the end:\n{lines}"
         )
 
-    def record_milestone(args: dict) -> str:
+    def record_milestones(args: dict) -> str:
+        """Record any number of milestones from one tool call."""
+        entries = args.get("entries")
+        if entries is None:
+            # Tolerate the single-entry shape. The model occasionally reverts to
+            # the old flat form, and a hard failure there costs a whole turn.
+            entries = [args] if args.get("milestone") else []
+        if not entries:
+            return "entries was empty — nothing recorded."
+        notes = [_record_one(e) for e in entries]
+
+        remaining = state.missing()
+        if remaining:
+            notes.append(
+                "Still missing: "
+                + ", ".join(f"{m.code} (\"{m.ask_hi}\")" for m in remaining[:4])
+                + ". Ask for these in ONE grouped question."
+            )
+        else:
+            notes.append("All required milestones collected — read the summary back.")
+        return " ".join(notes)
+
+    def _record_one(args: dict) -> str:
         code = args.get("milestone", "")
         when = (args.get("time_reported") or "").strip()
         iso = (args.get("time_iso") or "").strip() or None
@@ -186,12 +221,7 @@ def make_handlers(state: TripState) -> dict:
         m = BY_CODE[code]
         parts = [f"Recorded {code} at '{when}'."]
         if m.needs_document and not doc:
-            parts.append(f"Still need the document: {m.document_hi}.")
-        remaining = state.missing()
-        if remaining:
-            parts.append(f"Next ask: \"{remaining[0].ask_hi}\" ({remaining[0].code})")
-        else:
-            parts.append("All required milestones collected — now read the summary back.")
+            parts.append(f"Document still needed: {m.document_hi}.")
         return " ".join(parts)
 
     def get_missing(_args: dict) -> str:
@@ -271,7 +301,7 @@ def make_handlers(state: TripState) -> dict:
 
     return {
         "set_current_stage": set_current_stage,
-        "record_milestone": record_milestone,
+        "record_milestones": record_milestones,
         "get_missing": get_missing,
         "give_up_on": give_up_on,
         "end_call": end_call,

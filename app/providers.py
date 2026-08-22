@@ -200,6 +200,12 @@ class LLMProvider(ABC):
         self.tokens_cache_write = 0
         self.api_calls = 0
 
+    #: Tools after which the turn is OVER. Without this the model said its
+    #: goodbye, called end_call in the same reply exactly as instructed, and then
+    #: the tool loop went round again and it said goodbye a second time. The
+    #: driver heard "dhanyawad, aapka din shubh rahe" twice.
+    terminal_tools: frozenset[str] = frozenset({"end_call"})
+
     def register_tools(self, tools: list[dict], handlers: dict) -> None:
         """Attach tool definitions and their Python implementations."""
         self._tools = tools
@@ -286,7 +292,24 @@ class DeepgramSTT(STTProvider):
         self._barge_pulse = False         # see send_audio: a ONE-frame signal
         self._barged = False              # already interrupted this utterance
         self._barge_frames = 8            # 160 ms of speech, not a door slam
-        self._barge_rms = 900.0           # a handset mic; echo sits far below
+        # A FIXED threshold of 900 was too deaf -- the driver said "saare doc de
+        # diye hai" over the document question and it never registered -- so the
+        # bar is CALIBRATED PER UTTERANCE instead.
+        #
+        # The first 300 ms of each thing the agent says is treated as a sample of
+        # how loudly our own voice is coming back, and the bar is set well above
+        # that. On a handset there is almost no echo, so the bar sits at the floor
+        # and an ordinary speaking voice interrupts. On a speakerphone the echo is
+        # loud, the bar rises with it, and only someone genuinely talking over us
+        # gets through. Learning the level from "quiet frames" instead does not
+        # work: on a speakerphone there are none, so the bar never rises and the
+        # agent interrupts itself.
+        self._barge_floor_rms = 400.0     # never trip below this, whatever
+        self._barge_echo_mult = 2.5       # ... nor below this multiple of echo
+        self._calib_frames = 15           # 300 ms of "this is our own voice"
+        self._utt_frames = 0
+        self._echo_peak = 0.0
+        self._was_speaking = False
         self._held: list[bytes] = []      # last few suppressed frames
         # Deepgram hangs up after ~10s with nothing received. Send a KeepAlive
         # every few seconds while suppressed, comfortably inside that window.
@@ -312,6 +335,14 @@ class DeepgramSTT(STTProvider):
         if self._barge_pulse:
             self.caller_speaking = False
             self._barge_pulse = False
+
+        # A new agent utterance restarts the echo calibration, because the level
+        # depends on what the handset is doing right now, not on the last turn.
+        if self.agent_speaking and not self._was_speaking:
+            self._utt_frames = 0
+            self._echo_peak = 0.0
+            self._loud_frames = 0
+        self._was_speaking = self.agent_speaking
 
         # Do not forward our own playback. Costs money and gets transcribed.
         suppress = self.agent_speaking or self._tail > 0
@@ -392,7 +423,15 @@ class DeepgramSTT(STTProvider):
         except Exception:
             return False
 
-        if rms >= self._barge_rms:
+        # Calibration window: this is our own voice, by definition. Measure it
+        # and refuse to call it an interruption.
+        if self._utt_frames < self._calib_frames:
+            self._utt_frames += 1
+            self._echo_peak = max(self._echo_peak, rms)
+            return False
+
+        thresh = max(self._barge_floor_rms, self._barge_echo_mult * self._echo_peak)
+        if rms >= thresh:
             self._loud_frames += 1
         else:
             self._loud_frames = 0
@@ -926,8 +965,14 @@ class AnthropicLLM(LLMProvider):
             # could only report as "no usable content". That happened twice on one
             # real call -- 200 OK, sixteen seconds of silence, and then the driver
             # was asked to repeat an answer he had given perfectly clearly.
+            #
+            # It goes in extra_body, not as a keyword. The installed SDK rejected
+            # `thinking=` outright ("unexpected keyword argument"), so the setting
+            # never reached the API at all -- it only burned a round discovering
+            # that. extra_body is merged into the request JSON by every SDK
+            # version, so this works regardless of how old the client is.
             if AnthropicLLM._thinking_param:
-                kwargs["thinking"] = {"type": "disabled"}
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
                     async for event in stream:
@@ -942,10 +987,11 @@ class AnthropicLLM(LLMProvider):
                                 yield c
                     final = await stream.get_final_message()
             except Exception as e:
-                if kwargs.get("thinking") and "thinking" in str(e).lower():
+                if kwargs.get("extra_body") and "thinking" in str(e).lower():
                     log.warning(
                         "%s rejected thinking={'type':'disabled'} (%s) — retrying "
-                        "without it and not asking again this process",
+                        "without it and not asking again this process. Latency "
+                        "and cost will both be higher; upgrade the anthropic SDK.",
                         self._model, e,
                     )
                     AnthropicLLM._thinking_param = False
@@ -1038,23 +1084,15 @@ class AnthropicLLM(LLMProvider):
                 [tc.name for tc in tool_calls],
             )
 
-            # SAY SOMETHING before running the tools.
+            # NO filler here any more.
             #
-            # On a real call this round returned three tool calls and no text at
-            # all, spent 8 seconds doing it, and only spoke on the SECOND round.
-            # From the driver's side that is ten seconds of silence right after
-            # he finished a long answer, and he hung up. Tool work is invisible;
-            # silence on a phone call is indistinguishable from a dropped line.
-            #
-            # Only on the first round, and only when nothing was said -- repeating
-            # "one moment" before every tool call would be worse than saying it
-            # once.
-            if _round == 0 and not said:
-                from .languages import spec as _lspec
-                _sp = _lspec(_s().agent_language)
-                filler = _sp.filler if _sp else "One moment."
-                log.info("speaking filler while tools run: %r", filler)
-                yield filler
+            # This used to speak a holding line when a round produced tool calls
+            # and no text -- but it could only fire once the round had ALREADY
+            # finished, which is after the silence rather than during it. The
+            # driver had already sat through the whole gap by then. Pipeline's
+            # stall filler (see ai.py) speaks ~900 ms into the turn WHILE the
+            # model works, which is the only timing that actually helps, and
+            # doing both put two holding lines back to back.
             results = []
             for tc in tool_calls:
                 out = self._run_tool(tc.name, tc.input or {})
@@ -1062,6 +1100,12 @@ class AnthropicLLM(LLMProvider):
                     {"type": "tool_result", "tool_use_id": tc.id, "content": out}
                 )
             self.history.append({"role": "user", "content": results})
+
+            ended = [tc.name for tc in tool_calls if tc.name in self.terminal_tools]
+            if ended:
+                log.info("%s ended the turn — not looping for another reply",
+                         ", ".join(ended))
+                return
 
     def _run_tool(self, name: str, args: dict) -> str:
         handler = self._handlers.get(name)
