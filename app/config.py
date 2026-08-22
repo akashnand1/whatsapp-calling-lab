@@ -35,10 +35,28 @@ class Settings(BaseSettings):
     # every other language.
     deepgram_model: str = "nova-3"
     # Deepgram's own endpointing, in ms. It replaces our SpeechGate's turn
-    # detection for cloud STT, and being model-side it is far better than an
-    # energy threshold. Their newer Flux model folds this into the model itself.
-    deepgram_endpointing_ms: int = 300
-    deepgram_utterance_end_ms: int = 1000
+    # detection for cloud STT.
+    #
+    # THIS PAIR IS THE INTERRUPTION DIAL, and 300/1000 was far too eager.
+    # On the first real call the driver said "हां, मेरा" ("yes, my..."), paused
+    # about a second to think, and UtteranceEnd fired -- so the agent treated
+    # half a sentence as a finished turn and talked over him. Then "loading"
+    # alone became another turn. Two fragments instead of one answer.
+    #
+    #   endpointing_ms     silence before a SEGMENT is finalised
+    #   utterance_end_ms   silence before we treat the TURN as over  <-- the one
+    #                      that matters; it is what dispatches to the LLM
+    #
+    # The trade is direct: raising it means the agent waits longer before
+    # replying, lowering it means it interrupts. 2200 ms tolerates a driver
+    # pausing mid-thought, which matters more than shaving a second off a reply
+    # they never finished giving.
+    #
+    # The principled fix is Deepgram's Flux model, which has end-of-turn
+    # detection built into the model rather than inferred from silence. It
+    # covers Hindi and Russian but not Turkish, Arabic or Urdu.
+    deepgram_endpointing_ms: int = 700
+    deepgram_utterance_end_ms: int = 2200
     # How much sustained silence ends a caller's turn. Shared by BOTH local
     # engines so a driver gets the same turn-taking whichever recogniser their
     # language routes to. 700ms cut people who paused to think; 1100 does not.

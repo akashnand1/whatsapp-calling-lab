@@ -167,15 +167,24 @@ async def _handle_calls(value: dict[str, Any]) -> None:
                 await _answer_inbound(call_id, call.get("from", ""), sdp)
 
         elif event == "terminate":
-            log.info(
-                "call terminated id=%s status=%s duration=%ss correlation=%s",
+            # Our app is subscribed to `calls` for the WHOLE WhatsApp Business
+            # Account, so Meta sends us the termination of every call on that
+            # number -- including the vendor's production traffic. Those arrive
+            # with no correlation id and no duration, and there were dozens of
+            # them interleaved with our own call, which made the log unreadable
+            # at exactly the moment we needed to read it. Log them at DEBUG.
+            ours = session is not None
+            (log.info if ours else log.debug)(
+                "call terminated id=%s status=%s duration=%ss correlation=%s%s",
                 call_id,
                 call.get("status"),
                 call.get("duration"),
                 call.get("biz_opaque_callback_data"),
+                "" if ours else "   [not ours — another app on this WABA]",
             )
             for err in call.get("errors", []) or []:
-                log.error("call error: %s", err)
+                # Someone else's failed call is not our error.
+                (log.error if ours else log.debug)("call error: %s", err)
             if session:
                 if session.pipeline:
                     log.info("transcript:\n%s", session.transcript_text())
