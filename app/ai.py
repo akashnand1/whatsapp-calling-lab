@@ -28,14 +28,35 @@ from .providers import make_llm, make_stt, make_tts
 log = logging.getLogger("ai")
 
 
-def _fallback_line() -> str:
-    """Said when a turn fails, so the caller never hears dead air."""
-    if get_settings().agent_language.lower().startswith("hi"):
-        return "एक सेकंड रुकिए, ज़रा दिक़्क़त आ गई थी। आप फिर से बताइए।"
-    return "One moment, I had a small problem there. Please say that again."
+# How long to keep the line open after the agent's closing line, in case the
+# driver adds one last thing. Long enough for a "shukriya, theek hai", short
+# enough that nobody is left holding a dead line -- or paying for it.
+LINGER_AFTER_GOODBYE_S = 6.0
 
 
-FALLBACK_LINE = _fallback_line()
+def _line(kind: str) -> str:
+    """A spoken line for one of OUR failures, from the language registry.
+
+    Resolved per call rather than frozen into a module constant: the constant was
+    computed at import, before AGENT_LANGUAGE could matter, so every language got
+    the Hindi text.
+
+    The distinction between the two kinds is the whole point:
+
+      processing -- our bug, and we still have the driver's answer. Say we are
+                    noting it down. NEVER ask him to repeat himself; he already
+                    said it clearly, and being asked twice is what made one
+                    driver snap "you keep asking me the same thing".
+      garbled    -- the audio itself was unusable, so we genuinely need it again.
+    """
+    from .languages import spec
+    sp = spec(get_settings().agent_language)
+    if sp is not None and getattr(sp, kind, ""):
+        return getattr(sp, kind)
+    return {
+        "processing": "Got that — just noting it down, one moment.",
+        "garbled": "Sorry, the line broke up there. Could you say that again?",
+    }.get(kind, "One moment.")
 
 
 class Pipeline:
@@ -50,6 +71,8 @@ class Pipeline:
         system_prompt: str,
         on_audio: Callable[[bytes, int], None],
         interrupt_playback: Callable[[], None],
+        on_finish: Callable[[], None] | None = None,
+        still_playing: Callable[[], bool] | None = None,
     ) -> None:
         self.stt = make_stt()
         self.llm = make_llm(system_prompt)
@@ -64,6 +87,13 @@ class Pipeline:
         self.llm.register_tools(TOOLS, make_handlers(self.trip))
         self._on_audio = on_audio
         self._interrupt = interrupt_playback
+        # Called once the agent has finished the conversation and the driver has
+        # had a few seconds to add anything. Without it the line simply stayed
+        # open: on the last test call the driver said thank you and then sat on a
+        # live, billed line for 31 seconds waiting for something to happen.
+        self._on_finish = on_finish
+        self._still_playing = still_playing
+        self._linger: asyncio.Task | None = None
 
         self._speaking = False
         self._speak_task: asyncio.Task | None = None
@@ -85,6 +115,7 @@ class Pipeline:
         await self.stt.connect()
 
     async def close(self) -> None:
+        self._cancel_linger()
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
         await self.stt.close()
@@ -103,6 +134,8 @@ class Pipeline:
 
     async def handle_turn(self, user_text: str) -> None:
         """The human finished a turn. Think, then speak."""
+        # He is still talking, so any pending hang-up is off.
+        self._cancel_linger()
         self.transcript.append(("user", user_text))
         log.info("user: %s", user_text)
         self._turn_started = time.monotonic()
@@ -117,9 +150,10 @@ class Pipeline:
             if len(self.transcript) == spoke:
                 log.error(
                     "turn produced NO speech (no text, no tool call, no error) "
-                    "— speaking the fallback so the caller is not left in silence"
+                    "— speaking a processing line so the caller is not left in "
+                    "silence"
                 )
-                await self._launch(_once(FALLBACK_LINE))
+                await self._launch(_once(_line("processing")))
         except asyncio.CancelledError:
             # Log BEFORE re-raising. This path left no trace at all, so a
             # cancelled turn was indistinguishable from a turn that never
@@ -136,9 +170,50 @@ class Pipeline:
             # on a real call that reads as a dropped line, and they hang up.
             log.exception("turn failed; speaking a fallback")
             try:
-                await self._launch(_once(FALLBACK_LINE))
+                await self._launch(_once(_line("garbled")))
             except Exception:
                 log.exception("fallback also failed")
+        finally:
+            # Did the model call end_call during this turn? If so, wait for the
+            # goodbye to finish playing, give him a moment to reply, then hang up.
+            self._arm_linger_if_finished()
+
+    # -- ending the call ----------------------------------------------------
+
+    def _cancel_linger(self) -> None:
+        if self._linger and not self._linger.done():
+            self._linger.cancel()
+        self._linger = None
+
+    def _arm_linger_if_finished(self) -> None:
+        if not getattr(self.trip, "finished", False) or self._on_finish is None:
+            return
+        if self._linger and not self._linger.done():
+            return                      # already armed; do not restart the clock
+        self._linger = asyncio.create_task(self._linger_then_hangup())
+
+    async def _linger_then_hangup(self) -> None:
+        try:
+            # Wait for the closing line to actually leave the speaker. Piper
+            # renders a whole sentence in one call, so generation finishes seconds
+            # before the audio does -- timing the linger from generation would cut
+            # the goodbye off mid-word.
+            for _ in range(300):                          # 30 s ceiling
+                if not (self._still_playing and self._still_playing()):
+                    break
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(LINGER_AFTER_GOODBYE_S)
+        except asyncio.CancelledError:
+            log.info("hang-up cancelled — the driver said something else")
+            return
+        log.info(
+            "nothing further %.0fs after the closing line — hanging up",
+            LINGER_AFTER_GOODBYE_S,
+        )
+        try:
+            self._on_finish()          # type: ignore[misc]
+        except Exception:
+            log.exception("hang-up callback failed")
 
     async def _launch(self, chunks: AsyncIterator[str]) -> None:
         """Run one playback stream as a cancellable task, superseding any prior."""

@@ -78,12 +78,31 @@ def _spoken_turn_tokens() -> int:
     """
     code = _s().agent_language.lower()[:2]
     if code in ("hi", "ar"):
-        return 1400
+        # 1400 was still not enough. On a real call a round that had to emit
+        # three record_milestone calls in Devanagari came back
+        # stop_reason=max_tokens with the last call truncated, and another came
+        # back with no usable content at all. A cap only has to be low enough to
+        # stop rambling; the prompt already enforces brevity, and unused budget
+        # costs nothing.
+        return 2400
     # Registered languages carry their own budget, because tokens-per-word varies
     # by script: Cyrillic costs more than Latin, Devanagari more again.
     from .languages import spec
     s = spec(code)
     return s.turn_tokens if s else 800
+
+
+def _processing_line() -> str:
+    """What to say when the failure is OURS and we still have the answer.
+
+    Not an apology, and above all not "say that again". The driver's answer was
+    perfectly clear and we are still holding it; asking him to repeat it makes the
+    agent look broken and burns the one thing a four-minute call cannot spare. He
+    had already said "you keep asking me the same thing" by the second time.
+    """
+    from .languages import spec
+    sp = spec(_s().agent_language)
+    return (sp.processing if sp else None) or "Bear with me, noting that down."
 
 
 # ===========================================================================
@@ -249,6 +268,26 @@ class DeepgramSTT(STTProvider):
         # also stops us paying Deepgram per-minute for our own audio.
         self._tail = 0
         self._tail_frames = 20            # 400 ms at 20 ms/frame
+
+        # Barge-in while suppressed.
+        #
+        # Deepgram never sets `caller_speaking` -- that flag belongs to the local
+        # SpeechGate -- so with this provider barge-in was dead: anything the
+        # driver said over the agent was thrown away silently and never reached
+        # the recogniser at all. That is why a "shukriya" spoken over the closing
+        # line vanished without trace. Suppression is still right (we must not
+        # transcribe our own voice off a speakerphone), but it has to be
+        # interruptible, so run a cheap energy detector on the frames we drop.
+        #
+        # Deliberately conservative: it takes sustained, clearly-above-echo audio
+        # to trip, and the transcript-level `looks_like_echo` check in ai.py is
+        # the backstop if our own voice ever gets through anyway.
+        self._loud_frames = 0
+        self._barge_pulse = False         # see send_audio: a ONE-frame signal
+        self._barged = False              # already interrupted this utterance
+        self._barge_frames = 8            # 160 ms of speech, not a door slam
+        self._barge_rms = 900.0           # a handset mic; echo sits far below
+        self._held: list[bytes] = []      # last few suppressed frames
         # Deepgram hangs up after ~10s with nothing received. Send a KeepAlive
         # every few seconds while suppressed, comfortably inside that window.
         self._last_sent = time.monotonic()
@@ -266,12 +305,47 @@ class DeepgramSTT(STTProvider):
     async def send_audio(self, pcm16: bytes) -> None:
         if not self._ws or self._closed:
             return
+        # `caller_speaking` is a ONE-FRAME pulse. The session reads it the moment
+        # this call returns, and it has to be gone by the next frame: the 400 ms
+        # echo tail is still suppressed audio, so a latched flag would re-fire
+        # barge-in twenty times over for a single interruption.
+        if self._barge_pulse:
+            self.caller_speaking = False
+            self._barge_pulse = False
+
         # Do not forward our own playback. Costs money and gets transcribed.
         suppress = self.agent_speaking or self._tail > 0
         if self.agent_speaking:
             self._tail = self._tail_frames
         elif self._tail > 0:
             self._tail -= 1
+
+        if suppress and not self._barged and self._is_barge_in(pcm16):
+            # The driver is talking over us. Stop suppressing, and forward the
+            # frames we were about to discard so his first syllable survives --
+            # dropping it turns "shukriya, bas ho gaya" into "bas ho gaya", or
+            # into nothing at all.
+            log.info("barge-in detected during playback — resuming transcription")
+            self.caller_speaking = True
+            self._barge_pulse = True
+            # One announcement per interruption. Normally the session flushes the
+            # track and `agent_speaking` goes False within a frame or two, but if
+            # playback ever wedged we would otherwise re-fire barge-in every
+            # 160 ms for the rest of the call.
+            self._barged = True
+            self._tail = 0
+            suppress = False
+            # Require a fresh run of loud frames before announcing another
+            # barge-in, so a caller who keeps talking does not fill the log.
+            self._loud_frames = 0
+            held, self._held = self._held, []
+            for frame in held:
+                try:
+                    await self._ws.send(frame)
+                except Exception:
+                    self._closed = True
+                    return
+            self._last_sent = time.monotonic()
 
         if suppress:
             # CRITICAL: Deepgram closes the socket with 1011 after ~10s of
@@ -281,11 +355,48 @@ class DeepgramSTT(STTProvider):
             # KeepAlive costs nothing and is not billed as audio.
             await self._keepalive()
             return
+        self._loud_frames = 0
+        self._held.clear()
+        if not self.agent_speaking:
+            # Re-arm only once WE have stopped talking. The barge-in branch above
+            # deliberately falls through to here, so re-arming unconditionally let
+            # one interruption announce itself every 160 ms for as long as the
+            # agent kept speaking.
+            self._barged = False
         try:
             await self._ws.send(pcm16)
             self._last_sent = time.monotonic()
         except Exception:
             self._closed = True
+
+    def _is_barge_in(self, pcm16: bytes) -> bool:
+        """Sustained speech-level energy while we are the one talking.
+
+        Energy alone cannot tell the driver's voice from our own echo, which is
+        why turn-*ending* is left to Deepgram. It is good enough to decide "someone
+        is definitely talking over us", and being wrong costs one interrupted
+        sentence rather than a lost answer.
+        """
+        # Keep a short rolling window so the start of the interruption is not lost
+        # to the detector's own warm-up period.
+        self._held.append(pcm16)
+        if len(self._held) > self._barge_frames + 4:
+            self._held.pop(0)
+
+        try:
+            import numpy as np
+            samples = np.frombuffer(pcm16, dtype=np.int16)
+            if samples.size == 0:
+                return False
+            rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+        except Exception:
+            return False
+
+        if rms >= self._barge_rms:
+            self._loud_frames += 1
+        else:
+            self._loud_frames = 0
+        return self._loud_frames >= self._barge_frames
 
     async def _keepalive(self) -> None:
         now = time.monotonic()
@@ -722,6 +833,10 @@ class AnthropicLLM(LLMProvider):
     agreements. Check which regions currently offer the model you want.
     """
 
+    # Set False for the life of the process if a model rejects the parameter,
+    # rather than failing every single turn to learn the same thing again.
+    _thinking_param = True
+
     def __init__(self, system_prompt: str, use_bedrock: bool = False) -> None:
         super().__init__(system_prompt)
         s = get_settings()
@@ -782,6 +897,7 @@ class AnthropicLLM(LLMProvider):
         a call; recording each fact as it is confirmed gives a payload the TMS can
         consume, and lets the agent know precisely what is still missing.
         """
+        _empty_retries = 0
         for _round in range(6):                  # bound the tool loop
             buf, said = "", []
             tool_calls: list[dict] = []
@@ -796,24 +912,45 @@ class AnthropicLLM(LLMProvider):
                 _round + 1, self._model, len(self._tools or []),
                 len(self.history), _s().prompt_caching,
             )
-            async with self._client.messages.stream(
+            kwargs: dict = dict(
                 model=self._model,
                 max_tokens=_spoken_turn_tokens(),
                 system=self._cached_system(),
                 messages=self.history,
                 tools=self._cached_tools(),
-            ) as stream:
-                async for event in stream:
-                    if (
-                        event.type == "content_block_delta"
-                        and getattr(event.delta, "type", "") == "text_delta"
-                    ):
-                        buf += event.delta.text
-                        chunks, buf = self._chunk(buf)
-                        for c in chunks:
-                            said.append(c)
-                            yield c
-                final = await stream.get_final_message()
+            )
+            # Extended thinking is the enemy of a live phone call. Thinking tokens
+            # are billed, they count against max_tokens, and the driver cannot hear
+            # one of them. Worse: when the budget runs out INSIDE a thinking block
+            # the response arrives with no text and no tool call, which this code
+            # could only report as "no usable content". That happened twice on one
+            # real call -- 200 OK, sixteen seconds of silence, and then the driver
+            # was asked to repeat an answer he had given perfectly clearly.
+            if AnthropicLLM._thinking_param:
+                kwargs["thinking"] = {"type": "disabled"}
+            try:
+                async with self._client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        if (
+                            event.type == "content_block_delta"
+                            and getattr(event.delta, "type", "") == "text_delta"
+                        ):
+                            buf += event.delta.text
+                            chunks, buf = self._chunk(buf)
+                            for c in chunks:
+                                said.append(c)
+                                yield c
+                    final = await stream.get_final_message()
+            except Exception as e:
+                if kwargs.get("thinking") and "thinking" in str(e).lower():
+                    log.warning(
+                        "%s rejected thinking={'type':'disabled'} (%s) — retrying "
+                        "without it and not asking again this process",
+                        self._model, e,
+                    )
+                    AnthropicLLM._thinking_param = False
+                    continue
+                raise
 
             # Accumulate REAL token counts. Per-call cost was previously an
             # estimate built from character counts and an assumed tokens-per-word
@@ -857,7 +994,29 @@ class AnthropicLLM(LLMProvider):
                 # thinking / redacted_thinking deliberately dropped.
 
             if not assistant:
-                log.warning("model returned no usable content — ending turn")
+                # Log WHAT came back. This was previously a bare warning, so there
+                # was no way to tell a thinking-only response from a truncated tool
+                # call from an empty stream -- three different bugs with the same
+                # symptom.
+                blocks = [getattr(b, "type", "?") for b in final.content] or ["<none>"]
+                log.warning(
+                    "round %d produced NO usable content: stop_reason=%s blocks=%s "
+                    "output_tokens=%s",
+                    _round + 1, getattr(final, "stop_reason", "?"), blocks,
+                    getattr(getattr(final, "usage", None), "output_tokens", "?"),
+                )
+                # Retry the SAME turn. The driver said something intelligible and
+                # we still have it; the failure is entirely ours. Telling him to
+                # say it again is both wrong and infuriating -- it is what made him
+                # snap "you keep asking me the same thing".
+                if _empty_retries == 0:
+                    _empty_retries += 1
+                    if not said:
+                        line = _processing_line()
+                        log.info("speaking %r, then retrying the turn", line)
+                        yield line
+                    continue
+                log.error("two empty responses in a row — abandoning this turn")
                 return
             self.history.append({"role": "assistant", "content": assistant})
 
@@ -1048,6 +1207,17 @@ class ElevenLabsTTS(TTSProvider):
                     yield chunk
 
 
+# Piper's ONNX model costs ~1.2 s to load and is completely stateless once
+# loaded, so it belongs to the PROCESS, not to a provider instance. It used to be
+# cached on `self`, which looked right and achieved nothing: main.py pre-warms TTS
+# at startup with one instance, discards it, and the instance the first CALL
+# builds loaded the model all over again. So the very caller the pre-warm existed
+# to protect still waited over a second for the greeting -- which is exactly the
+# silence-on-answer that was reported.
+_PIPER_CACHE: dict[str, object] = {}
+_PIPER_LOCK = asyncio.Lock()
+
+
 class PiperLocalTTS(TTSProvider):
     """Self-hosted TTS via Piper. Nothing leaves your network.
 
@@ -1122,9 +1292,8 @@ class PiperLocalTTS(TTSProvider):
                 os.path.basename(cfg_path), self.rate,
             )
 
-        # Loaded lazily on first use, then reused for the life of the process.
-        self._loaded = None
-        self._lock = asyncio.Lock()
+        # The loaded voice lives in _PIPER_CACHE at MODULE scope, not here.
+        # A per-instance cache is why the startup pre-warm did nothing.
 
         log.info(
             "TTS: piper (local) model=%s rate=%d",
@@ -1132,30 +1301,40 @@ class PiperLocalTTS(TTSProvider):
         )
 
     async def _voice(self):
-        """Load the ONNX model once and keep it.
+        """Load the ONNX model once per PROCESS and keep it.
 
         The obvious implementation shells out to the `piper` binary per call. Do
         not: the model is re-loaded on every invocation, and because the LLM emits
         clause-sized chunks a single reply pays that cost several times. Measured
         at ~2.5s for the first chunk. Holding the model in-process drops it to
         tens of milliseconds.
+
+        Keyed by model path at module scope so the startup pre-warm genuinely
+        benefits the first real call, and so switching language mid-process does
+        not evict the voice already in use.
         """
-        if self._loaded is not None:
-            return self._loaded
-        async with self._lock:
-            if self._loaded is None:                 # re-check inside the lock
-                from piper import PiperVoice
-                t0 = time.monotonic()
-                self._loaded = await asyncio.to_thread(PiperVoice.load, self._model)
-                try:
-                    self.rate = int(self._loaded.config.sample_rate)
-                except Exception:
-                    pass
-                log.info(
-                    "piper model loaded in %.0f ms (rate=%d) — cached for the process",
-                    (time.monotonic() - t0) * 1000, self.rate,
-                )
-        return self._loaded
+        key = self._model or ""
+        voice = _PIPER_CACHE.get(key)
+        if voice is None:
+            async with _PIPER_LOCK:
+                voice = _PIPER_CACHE.get(key)        # re-check inside the lock
+                if voice is None:
+                    from piper import PiperVoice
+                    t0 = time.monotonic()
+                    voice = await asyncio.to_thread(PiperVoice.load, self._model)
+                    _PIPER_CACHE[key] = voice
+                    log.info(
+                        "piper model loaded in %.0f ms — cached for the PROCESS "
+                        "(%d voice(s) resident)",
+                        (time.monotonic() - t0) * 1000, len(_PIPER_CACHE),
+                    )
+        else:
+            log.debug("piper voice served from the process cache")
+        try:
+            self.rate = int(voice.config.sample_rate)
+        except Exception:
+            pass
+        return voice
 
     async def stream(self, text: str) -> AsyncIterator[bytes]:
         try:

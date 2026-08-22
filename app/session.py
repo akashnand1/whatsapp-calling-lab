@@ -337,10 +337,54 @@ class CallSession:
             system_prompt=SYSTEM_PROMPT,
             on_audio=lambda pcm, rate: self.track.push_pcm(pcm, rate),  # type: ignore[union-attr]
             interrupt_playback=self.track.interrupt,
+            on_finish=self._agent_finished,
+            still_playing=lambda: bool(self.track and self.track.is_playing),
         )
-        await self.pipeline.start()
-        self._tasks.append(asyncio.create_task(self.pipeline.run_stt_loop()))
-        await self.pipeline.say(INBOUND_GREETING if inbound else GREETING)
+
+        # Greet and connect the recogniser AT THE SAME TIME.
+        #
+        # These used to be sequential, and connecting Deepgram took the better
+        # part of a second on a real call -- a second of silence after the driver
+        # answered, for nothing, because there is nothing worth hearing from him
+        # until we have spoken. Greeting first also means the recogniser comes up
+        # while our own audio is playing, which it would suppress anyway.
+        greeting = asyncio.create_task(
+            self.pipeline.say(INBOUND_GREETING if inbound else GREETING)
+        )
+        try:
+            await self.pipeline.start()
+            self._tasks.append(asyncio.create_task(self.pipeline.run_stt_loop()))
+        finally:
+            await greeting
+
+    # -- the agent decides the call is over ---------------------------------
+
+    def _agent_finished(self) -> None:
+        """Called once the agent has said goodbye and heard nothing further."""
+        # Deliberately NOT added to self._tasks: hangup() cancels everything in
+        # that list, and this task is the one calling hangup() -- it would cancel
+        # itself part-way through teardown.
+        self._teardown = asyncio.create_task(self._terminate())
+
+    async def _terminate(self) -> None:
+        """Hang up from OUR side, at Meta and locally.
+
+        Closing only the peer connection leaves the call up as far as WhatsApp is
+        concerned, so the driver keeps staring at a live call screen. Terminating
+        at the Graph API is what actually ends it.
+        """
+        log.info("agent finished the conversation — terminating the call")
+        if self.call_id:
+            from .graph import GraphClient
+            g = GraphClient()
+            try:
+                await g.terminate_call(self.call_id)
+            except Exception:
+                log.warning("Meta rejected the terminate; closing locally anyway",
+                            exc_info=True)
+            finally:
+                await g.close()
+        await self.hangup()
 
     async def _consume_inbound(self, track) -> None:  # noqa: ANN001
         """Pump inbound audio into STT, and watch for barge-in."""

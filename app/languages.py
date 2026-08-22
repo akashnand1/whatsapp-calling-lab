@@ -80,6 +80,20 @@ class LanguageSpec:
     # and "the line has dropped", and only one of those keeps people on the call.
     filler: str = "One moment."
 
+    # Spoken when OUR side fails: an empty model response, a truncated turn, a
+    # retry. Deliberately not an apology, and deliberately NOT "say that again".
+    # The driver's answer was fine and we still have it, so making him repeat it
+    # advertises our bug and spends the one thing a four-minute call cannot spare.
+    # On a real call the agent said "there was a problem, tell me again" twice for
+    # answers it had understood perfectly, and the driver snapped back: "you keep
+    # asking me the same thing." Say what is actually happening instead.
+    processing: str = "Got that — just noting it down, one moment."
+
+    # Spoken ONLY when the audio really was unusable and we genuinely need it
+    # again. Kept separate from `processing` so that our failures cannot masquerade
+    # as the driver's.
+    garbled: str = "Sorry, the line broke up there. Could you say that again?"
+
     @property
     def decode_lang(self) -> str:
         return self.stt_lang or self.code
@@ -128,6 +142,13 @@ HOW TO WORK
    as a separate turn.
 6. At the end -- this matters most -- read the whole list back in order and ask
    whether it is all correct. Never skip this, however long the call has run.
+7. Once they confirm it, say a short thank-you and call end_call in the SAME
+   reply. Do not leave the line open and silent afterwards: the driver has said
+   goodbye, he is waiting for the call to end, and every extra minute is billed.
+
+IF SOMETHING GOES WRONG ON OUR SIDE, never ask the driver to repeat an answer he
+already gave clearly. Say you are noting it down and carry on. Ask again only when
+the audio itself was unusable.
 
 FOUR RULES FOR KEEPING THE CALL SHORT. Do not break these.
 
@@ -185,6 +206,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="en/en_US/amy/medium",
         piper_voice="en_US-amy-medium",
         filler="Right, one moment.",
+        processing="Got that — just noting it down, one moment.",
+        garbled="Sorry, the line broke up there. Could you say that again?",
         piper_rate=22050,
         # Latin script is roughly one token per word, so a turn needs far fewer
         # tokens than the same speech in Devanagari or Cyrillic.
@@ -207,6 +230,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="hi/hi_IN/pratham/medium",
         piper_voice="hi_IN-pratham-medium",
         filler="ठीक है, एक सेकंड।",
+        processing="जी, लिख रहा हूँ — एक सेकंड।",
+        garbled="माफ़ कीजिए, आवाज़ कट गई थी। ज़रा फिर से बताइए।",
         piper_rate=22050,
         # Devanagari costs roughly 3-4x the tokens of Latin script, and the
         # nine-milestone read-back is long. At 420 the model ran out of budget
@@ -238,6 +263,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="tr/tr_TR/dfki/medium",
         piper_voice="tr_TR-dfki-medium",
         filler="Tamam, bir saniye.",
+        processing="Aldım, not ediyorum — bir saniye.",
+        garbled="Kusura bakmayın, ses kesildi. Tekrar söyler misiniz?",
         piper_rate=22050,
         turn_tokens=1100,
         greeting_out=(
@@ -261,6 +288,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ru/ru_RU/dmitri/medium",
         piper_voice="ru_RU-dmitri-medium",
         filler="Хорошо, одну секунду.",
+        processing="Записываю — одну секунду.",
+        garbled="Извините, связь прервалась. Повторите, пожалуйста.",
         piper_rate=22050,
         # Cyrillic tokenises worse than Latin, though better than Devanagari.
         turn_tokens=1200,
@@ -286,6 +315,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ar/ar_JO/kareem/medium",
         piper_voice="ar_JO-kareem-medium",
         filler="حسنًا، لحظة واحدة.",
+        processing="تمام، أسجّل التفاصيل — لحظة واحدة.",
+        garbled="عذرًا، تقطّع الصوت. أعد ما قلته من فضلك.",
         piper_rate=22050,
         turn_tokens=1400,
         greeting_out=(
@@ -310,6 +341,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ur/ur_PK/fasih/medium",
         piper_voice="ur_PK-fasih-medium",
         filler="ٹھیک ہے، ایک سیکنڈ۔",
+        processing="جی، لکھ رہا ہوں — ایک سیکنڈ۔",
+        garbled="معاف کیجیے، آواز کٹ گئی تھی۔ ذرا دوبارہ بتائیے۔",
         piper_rate=22050,
         turn_tokens=1400,
         greeting_out=(
@@ -343,6 +376,8 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="kk/kk_KZ/issai/high",
         piper_voice="kk_KZ-issai-high",
         filler="Жақсы, бір секунд.",
+        processing="Жазып отырмын — бір секунд.",
+        garbled="Кешіріңіз, дауыс үзіліп кетті. Қайталап айтыңызшы.",
         piper_rate=22050,
         turn_tokens=1300,
         greeting_out=(

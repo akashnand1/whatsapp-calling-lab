@@ -167,6 +167,12 @@ class TripState:
     # read-back can flag them instead of silently inventing a value.
     uncertain: set[str] = field(default_factory=set)
 
+    # Set by the end_call tool when the agent has finished the conversation.
+    # Without it the line stayed open after the goodbye: on the last test call
+    # the driver said thank you, waited, and hung up 31 seconds later -- all of it
+    # billed, and it reads as the agent having frozen rather than finished.
+    finished: bool = False
+
     @property
     def elapsed_s(self) -> int:
         return int(time.monotonic() - self.started_at)

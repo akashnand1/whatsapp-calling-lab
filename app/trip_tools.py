@@ -122,6 +122,26 @@ TOOLS: list[dict] = [
             "required": ["milestone"],
         },
     },
+    {
+        "name": "end_call",
+        "description": (
+            "End the call. Call this in the SAME reply as your closing line, "
+            "once the driver has confirmed the read-back or has clearly finished "
+            "talking. The line stays open for a few more seconds so he can add "
+            "one last thing, and hangs up by itself after that. Never finish a "
+            "call by simply going quiet: the driver is left holding a live line, "
+            "which sounds like a fault and is billed by the minute."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Short note, e.g. 'all milestones confirmed'.",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -240,9 +260,19 @@ def make_handlers(state: TripState) -> dict:
             "Mention it in the summary as something to be sent by message later."
         )
 
+    def end_call(args: dict) -> str:
+        state.finished = True
+        log.info("agent ended the conversation: %s",
+                 args.get("reason") or "no reason given")
+        return (
+            "Noted. Say your closing line now and then stop talking — the line "
+            "closes on its own shortly after."
+        )
+
     return {
         "set_current_stage": set_current_stage,
         "record_milestone": record_milestone,
         "get_missing": get_missing,
         "give_up_on": give_up_on,
+        "end_call": end_call,
     }
