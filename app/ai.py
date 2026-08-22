@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import AsyncIterator, Callable
 
@@ -34,10 +35,7 @@ log = logging.getLogger("ai")
 # reading as a fault.
 STALL_FIRST_MS = 900
 STALL_REPEAT_MS = 4500
-
-# Three DIFFERENT sentences, in order. Repeating one line sounds like a stuck
-# recording; three distinct ones sound like someone working through something.
-STALL_LINES = ("checking", "processing", "filler")
+STALL_MAX_LINES = 3
 
 
 # How long to keep the line open after the agent's closing line, in case the
@@ -106,6 +104,9 @@ class Pipeline:
         self._on_finish = on_finish
         self._still_playing = still_playing
         self._linger: asyncio.Task | None = None
+        # Rotating holding lines -- see _next_stall().
+        self._stall_pool: list[str] = []
+        self._last_stall: str = ""
 
         self._speaking = False
         self._speak_task: asyncio.Task | None = None
@@ -194,6 +195,28 @@ class Pipeline:
 
     # -- filling the gap while the model works ------------------------------
 
+    def _next_stall(self) -> str:
+        """A holding line the caller has not heard recently.
+
+        The first version of this used one fixed sentence, which appeared five
+        times verbatim in a single call -- "ek minute, main ye detail dekh raha
+        hoon", every time, which is the exact moment a voice stops sounding like a
+        person. Walking a shuffled pool means no line repeats until every variant
+        has been used, and the seam between pools is checked too, so the same
+        sentence never lands twice in a row.
+        """
+        if not self._stall_pool:
+            from .languages import spec
+            sp = spec(get_settings().agent_language)
+            pool = list(getattr(sp, "stalls", ()) or ("One moment.",))
+            random.shuffle(pool)
+            if len(pool) > 1 and pool[0] == self._last_stall:
+                pool.append(pool.pop(0))       # do not repeat across the seam
+            self._stall_pool = pool
+        self._last_stall = self._stall_pool.pop(0)
+        return self._last_stall
+
+
     async def _with_stall_filler(self, chunks: AsyncIterator[str]) -> AsyncIterator[str]:
         """Speak a holding line if the model has not produced a word yet.
 
@@ -216,8 +239,8 @@ class Pipeline:
                 wait_s = (STALL_FIRST_MS if fillers == 0 else STALL_REPEAT_MS) / 1000
                 done, _ = await asyncio.wait({pending}, timeout=wait_s)
                 if not done:
-                    if fillers < len(STALL_LINES):
-                        line = _line(STALL_LINES[fillers])
+                    if fillers < STALL_MAX_LINES:
+                        line = self._next_stall()
                         log.info("no word from the model after %.1fs — saying %r",
                                  wait_s, line)
                         fillers += 1

@@ -96,7 +96,12 @@ TOOLS: list[dict] = [
                       "type": "string",
                       "description": (
                         "Optional. What he said about the document for this "
-                        "milestone, e.g. 'bhej diya', 'abhi nahi bheja'."
+                        "milestone, e.g. 'bhej diya', 'abhi nahi bheja'. To add "
+                        "ONLY a document status to a milestone whose time you "
+                        "already recorded, send that milestone with just this "
+                        "field -- do not resend a placeholder time like "
+                        "'confirmed', and never resend a time without its "
+                        "time_iso."
                       ),
                     },
                   },
@@ -213,6 +218,12 @@ def make_handlers(state: TripState) -> dict:
         iso = (args.get("time_iso") or "").strip() or None
         doc = (args.get("document_status") or "").strip() or None
         if not when:
+            # A document-only update is legitimate: he already gave the time and
+            # is now confirming the paperwork. Only reject it if we have nothing.
+            if doc and code in BY_CODE and code in state.records:
+                state.record(code, "", None, doc)
+                log.info("recorded document for %s: %r", code, doc)
+                return f"Document recorded for {code}: {doc}."
             return "time_reported was empty — ask the driver again."
         if not state.record(code, when, iso, doc):
             return f"unknown milestone '{code}'"

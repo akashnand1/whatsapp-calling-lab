@@ -937,6 +937,13 @@ class AnthropicLLM(LLMProvider):
         consume, and lets the agent know precisely what is still missing.
         """
         _empty_retries = 0
+        # Has this turn produced any audible speech yet? The tool loop used to
+        # let the model speak on EVERY round, so one driver answer could produce
+        # three separate spoken blocks: it asked "origin border kab pahunche" in
+        # round 1, asked it AGAIN in round 2, then bolted the document question on
+        # in round 3. From the driver's side that is two or three thoughts
+        # fighting over the line. A human says one thing and then waits.
+        spoke_this_turn = False
         for _round in range(6):                  # bound the tool loop
             buf, said = "", []
             tool_calls: list[dict] = []
@@ -1016,6 +1023,8 @@ class AnthropicLLM(LLMProvider):
             if buf.strip():
                 said.append(buf.strip())
                 yield buf.strip()
+            if said:
+                spoke_this_turn = True
 
             # Rebuild the assistant turn as plain dicts rather than replaying the
             # SDK's response objects. Those do not round-trip: a `thinking` block
@@ -1051,10 +1060,19 @@ class AnthropicLLM(LLMProvider):
                     _round + 1, getattr(final, "stop_reason", "?"), blocks,
                     getattr(getattr(final, "usage", None), "output_tokens", "?"),
                 )
-                # Retry the SAME turn. The driver said something intelligible and
-                # we still have it; the failure is entirely ours. Telling him to
-                # say it again is both wrong and infuriating -- it is what made him
-                # snap "you keep asking me the same thing".
+                # An empty reply AFTER we have already spoken is not a failure at
+                # all -- it is the model saying "I have said my piece". Treating
+                # it as an error is what produced a spurious "ji, likh raha hoon"
+                # tacked onto the end of perfectly good questions.
+                if spoke_this_turn:
+                    log.info("empty reply after speaking — the model considers "
+                             "the turn finished, which it is")
+                    return
+
+                # Nothing was said, so this really is a failure. Retry the SAME
+                # turn: the driver said something intelligible and we still have
+                # it, so telling him to repeat it is both wrong and infuriating --
+                # it is what made him snap "you keep asking me the same thing".
                 if _empty_retries == 0:
                     _empty_retries += 1
                     if not said:
@@ -1105,6 +1123,19 @@ class AnthropicLLM(LLMProvider):
             if ended:
                 log.info("%s ended the turn — not looping for another reply",
                          ", ".join(ended))
+                return
+
+            # ONE SPOKEN UTTERANCE PER TURN.
+            #
+            # If this round has already said something out loud, the tools have
+            # now run and their results are in history for the NEXT turn. Going
+            # round again only lets the model add a second thought to a question
+            # the driver has not answered yet -- which is exactly what happened:
+            # it asked about the documents and then, without pausing, read the
+            # entire nine-milestone summary in the same breath.
+            if said:
+                log.info("spoke %d clause(s) this round — tools have run, ending "
+                         "the turn instead of talking over the driver", len(said))
                 return
 
     def _run_tool(self, name: str, args: dict) -> str:

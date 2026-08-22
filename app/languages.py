@@ -92,9 +92,20 @@ class LanguageSpec:
     # Spoken ~1 second into a turn if the model has not produced a word yet,
     # WHILE it keeps working. The model spends its opening seconds writing tool
     # calls, which make no sound: on a real call the driver finished his sentence
-    # and heard nothing for 19.5 seconds. The old filler only fired after the
-    # round had already finished, which is far too late to reassure anyone.
-    checking: str = "Let me just check those details."
+    # and heard nothing for 19.5 seconds.
+    #
+    # SEVERAL phrasings, not one. A single line was correct the first time and
+    # obviously mechanical by the third -- it appeared five times verbatim in one
+    # call. People say the same thing differently each time, and that difference
+    # is most of what makes a voice sound human rather than looped. Pipeline walks
+    # a shuffled copy of this tuple, so no line repeats until all have been used.
+    stalls: tuple[str, ...] = (
+        "Let me just check those details.",
+        "One moment, pulling that up.",
+        "Right, noting that down.",
+        "Bear with me one second.",
+        "Got it — just checking.",
+    )
 
     # Spoken ONLY when the audio really was unusable and we genuinely need it
     # again. Kept separate from `processing` so that our failures cannot masquerade
@@ -217,7 +228,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="en/en_US/amy/medium",
         piper_voice="en_US-amy-medium",
         filler="Right, one moment.",
-        checking="Let me just check those details.",
+        stalls=(
+            "Let me just check those details.",
+            "One moment, pulling that up.",
+            "Right, noting that down.",
+            "Bear with me one second.",
+            "Got it — just checking.",
+        ),
         processing="Got that — just noting it down, one moment.",
         garbled="Sorry, the line broke up there. Could you say that again?",
         piper_rate=22050,
@@ -242,7 +259,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="hi/hi_IN/pratham/medium",
         piper_voice="hi_IN-pratham-medium",
         filler="ठीक है, एक सेकंड।",
-        checking="एक मिनट, मैं ये डिटेल देख रहा हूँ।",
+        stalls=(
+            "एक मिनट, मैं ये डिटेल देख रहा हूँ।",
+            "ज़रा रुकिए, सिस्टम में देख लेता हूँ।",
+            "हाँ, नोट कर रहा हूँ — एक सेकंड।",
+            "ठीक है, ज़रा मिला लेता हूँ।",
+            "समझ गया, एक सेकंड दीजिए।",
+        ),
         processing="जी, लिख रहा हूँ — एक सेकंड।",
         garbled="माफ़ कीजिए, आवाज़ कट गई थी। ज़रा फिर से बताइए।",
         piper_rate=22050,
@@ -276,7 +299,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="tr/tr_TR/dfki/medium",
         piper_voice="tr_TR-dfki-medium",
         filler="Tamam, bir saniye.",
-        checking="Bir dakika, bu bilgilere bakıyorum.",
+        stalls=(
+            "Bir dakika, bu bilgilere bakıyorum.",
+            "Şimdi sisteme bakıyorum, bir saniye.",
+            "Tamam, not ediyorum.",
+            "Bir saniye izin verin.",
+            "Anladım, kontrol ediyorum.",
+        ),
         processing="Aldım, not ediyorum — bir saniye.",
         garbled="Kusura bakmayın, ses kesildi. Tekrar söyler misiniz?",
         piper_rate=22050,
@@ -302,7 +331,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ru/ru_RU/dmitri/medium",
         piper_voice="ru_RU-dmitri-medium",
         filler="Хорошо, одну секунду.",
-        checking="Минуту, я сверяю эти данные.",
+        stalls=(
+            "Минуту, я сверяю эти данные.",
+            "Секунду, сейчас посмотрю в системе.",
+            "Так, записываю.",
+            "Один момент, пожалуйста.",
+            "Понял, проверяю.",
+        ),
         processing="Записываю — одну секунду.",
         garbled="Извините, связь прервалась. Повторите, пожалуйста.",
         piper_rate=22050,
@@ -330,7 +365,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ar/ar_JO/kareem/medium",
         piper_voice="ar_JO-kareem-medium",
         filler="حسنًا، لحظة واحدة.",
-        checking="لحظة، أراجع هذه التفاصيل.",
+        stalls=(
+            "لحظة، أراجع هذه التفاصيل.",
+            "ثانية واحدة، أبحث في النظام.",
+            "تمام، أسجّل ذلك.",
+            "أمهلني لحظة.",
+            "فهمت، أتحقق الآن.",
+        ),
         processing="تمام، أسجّل التفاصيل — لحظة واحدة.",
         garbled="عذرًا، تقطّع الصوت. أعد ما قلته من فضلك.",
         piper_rate=22050,
@@ -357,7 +398,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="ur/ur_PK/fasih/medium",
         piper_voice="ur_PK-fasih-medium",
         filler="ٹھیک ہے، ایک سیکنڈ۔",
-        checking="ایک منٹ، میں یہ تفصیل دیکھ رہا ہوں۔",
+        stalls=(
+            "ایک منٹ، میں یہ تفصیل دیکھ رہا ہوں۔",
+            "ذرا رکیے، سسٹم میں دیکھ لیتا ہوں۔",
+            "جی، نوٹ کر رہا ہوں۔",
+            "ایک سیکنڈ دیجیے۔",
+            "سمجھ گیا، چیک کر لوں۔",
+        ),
         processing="جی، لکھ رہا ہوں — ایک سیکنڈ۔",
         garbled="معاف کیجیے، آواز کٹ گئی تھی۔ ذرا دوبارہ بتائیے۔",
         piper_rate=22050,
@@ -393,7 +440,13 @@ LANGUAGES: dict[str, LanguageSpec] = {
         piper_dir="kk/kk_KZ/issai/high",
         piper_voice="kk_KZ-issai-high",
         filler="Жақсы, бір секунд.",
-        checking="Бір минут, мәліметтерді тексеріп жатырмын.",
+        stalls=(
+            "Бір минут, мәліметтерді тексеріп жатырмын.",
+            "Сәл күте тұрыңыз, жүйеден қарап жіберемін.",
+            "Жақсы, жазып отырмын.",
+            "Бір секунд, өтінемін.",
+            "Түсіндім, тексеріп жатырмын.",
+        ),
         processing="Жазып отырмын — бір секунд.",
         garbled="Кешіріңіз, дауыс үзіліп кетті. Қайталап айтыңызшы.",
         piper_rate=22050,

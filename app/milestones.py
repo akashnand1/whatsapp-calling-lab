@@ -192,6 +192,24 @@ class TripState:
     ) -> bool:
         if code not in BY_CODE:
             return False
+
+        # MERGE, do not replace.
+        #
+        # On a real call the model came back at the end to attach document
+        # statuses and sent record_milestones with time_reported="confirmed" and
+        # no time_iso. That overwrote a perfectly good 21:00 with the literal
+        # string "confirmed" and a null timestamp -- the milestone silently lost
+        # its time, and a null time in a TMS looks exactly as authoritative as a
+        # real one. A later call carrying no RESOLVABLE time is not a better time.
+        prev = self.records.get(code)
+        if prev is not None:
+            if not time_iso and prev.time_iso:
+                time_text, time_iso = prev.time_text, prev.time_iso
+            else:
+                time_text = time_text or prev.time_text
+                time_iso = time_iso or prev.time_iso
+            document_status = document_status or prev.document_status
+
         self.records[code] = MilestoneRecord(code, time_text, time_iso, document_status)
         # Reaching a milestone implies being at least that far along.
         if (
